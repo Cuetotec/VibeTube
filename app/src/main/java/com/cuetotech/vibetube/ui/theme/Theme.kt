@@ -1,4 +1,4 @@
-package com.example.vibetube.ui.theme
+package com.cuetotech.vibetube.ui.theme
 
 import android.app.Activity
 import android.os.Build

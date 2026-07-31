@@ -1,4 +1,4 @@
-package com.example.vibetube
+package com.cuetotech.vibetube
 
 import org.junit.Test
 

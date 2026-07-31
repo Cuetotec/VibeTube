@@ -1,6 +1,16 @@
 <resources>
     <string name="app_name">VibeTube</string>
     <string name="home_empty_songs">Aún no hay canciones</string>
+    <string name="home_search_placeholder">Buscar canción o artista</string>
+    <string name="home_search_clear">Borrar búsqueda</string>
+    <string name="home_no_results">Sin resultados para «%1$s»</string>
     <string name="home_error_loading_songs">No se pudieron cargar las canciones</string>
     <string name="home_retry">Reintentar</string>
+    <string name="tab_home">Inicio</string>
+    <string name="tab_collection">Mi Colección</string>
+    <string name="collection_retry">Reintentar</string>
+    <string name="collection_empty">Aún no tienes canciones favoritas.\nToca el corazón en una canción para guardarla.</string>
+    <string name="collection_remove_favorite">Quitar de Mi Colección</string>
+    <string name="player_add_favorite">Agregar a Mi Colección</string>
+    <string name="player_remove_favorite">Quitar de Mi Colección</string>
 </resources>

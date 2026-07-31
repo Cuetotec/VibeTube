@@ -25,6 +25,7 @@ fun SongItem(
     song: Song,
     modifier: Modifier = Modifier,
     onClick: () -> Unit = {},
+    trailingContent: @Composable () -> Unit = {},
 ) {
     Row(
         modifier = modifier
@@ -67,6 +68,7 @@ fun SongItem(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(start = 12.dp),
         )
+        trailingContent()
     }
 }
 

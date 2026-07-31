@@ -1,16 +1,68 @@
 <resources>
     <string name="app_name">VibeTube</string>
-    <string name="home_empty_songs">Aún no hay canciones</string>
-    <string name="home_search_placeholder">Buscar canción o artista</string>
-    <string name="home_search_clear">Borrar búsqueda</string>
-    <string name="home_no_results">Sin resultados para «%1$s»</string>
-    <string name="home_error_loading_songs">No se pudieron cargar las canciones</string>
-    <string name="home_retry">Reintentar</string>
+
+    <!-- Auth -->
+    <string name="auth_subtitle_login">Inicia sesión para escuchar tu música</string>
+    <string name="auth_subtitle_register">Crea tu cuenta y empieza a escuchar</string>
+    <string name="auth_display_name">Nombre</string>
+    <string name="auth_email">Email</string>
+    <string name="auth_password">Contraseña</string>
+    <string name="auth_submit_login">Iniciar sesión</string>
+    <string name="auth_submit_register">Registrarse</string>
+    <string name="auth_toggle_to_register">¿No tienes cuenta? Regístrate</string>
+    <string name="auth_toggle_to_login">¿Ya tienes cuenta? Inicia sesión</string>
+    <string name="auth_show_password">Mostrar contraseña</string>
+    <string name="auth_hide_password">Ocultar contraseña</string>
+
+    <!-- Navegación -->
     <string name="tab_home">Inicio</string>
-    <string name="tab_collection">Mi Colección</string>
-    <string name="collection_retry">Reintentar</string>
-    <string name="collection_empty">Aún no tienes canciones favoritas.\nToca el corazón en una canción para guardarla.</string>
-    <string name="collection_remove_favorite">Quitar de Mi Colección</string>
-    <string name="player_add_favorite">Agregar a Mi Colección</string>
-    <string name="player_remove_favorite">Quitar de Mi Colección</string>
+    <string name="tab_playlists">Mis Listas</string>
+
+    <!-- Inicio / Perfil -->
+    <string name="profile_sign_out">Cerrar sesión</string>
+    <string name="profile_banner">Portada del perfil</string>
+    <string name="profile_avatar">Avatar del perfil</string>
+    <string name="profile_add_by_url">Por enlace</string>
+
+    <!-- Búsqueda de YouTube -->
+    <string name="home_retry">Reintentar</string>
+    <string name="home_search_placeholder">Buscar canciones o vídeos en YouTube</string>
+    <string name="home_search_clear">Borrar búsqueda</string>
+    <string name="home_search_hint">Busca una canción, artista o vídeo y guárdalo en tus listas.</string>
+    <string name="home_search_results">Resultados</string>
+    <string name="home_search_no_results">Sin resultados para «%1$s»</string>
+    <string name="player_add_to_playlist">Añadir a una lista</string>
+
+    <!-- Listas de reproducción -->
+    <string name="playlists_title">Mis Listas</string>
+    <string name="playlists_new">Nueva</string>
+    <string name="playlists_empty_title">Aún no tienes listas</string>
+    <string name="playlists_empty_subtitle">Crea tu primera lista o busca canciones en Inicio para guardarlas.</string>
+    <string name="playlists_retry">Reintentar</string>
+    <string name="empty_browse_button">Buscar en Inicio</string>
+    <string name="playlist_public">Pública</string>
+    <string name="playlist_private">Privada</string>
+    <string name="playlist_tracks_count">%1$d canciones</string>
+    <string name="playlist_no_tracks_title">Esta lista no tiene vídeos añadidos</string>
+    <string name="playlist_no_tracks_subtitle">Busca en Inicio y añádelas con el botón «+»</string>
+    <string name="playlist_select_video_title">Selecciona un vídeo para reproducir</string>
+    <string name="playlist_select_video_subtitle">Toca un vídeo de la lista para empezar</string>
+    <string name="playlist_delete">Eliminar lista</string>
+    <string name="playlist_remove_track">Quitar canción de la lista</string>
+    <string name="playlist_back">Volver a mis listas</string>
+
+    <!-- Diálogos -->
+    <string name="add_to_playlist_title">Añadir a lista</string>
+    <string name="add_to_playlist_no_lists">Aún no tienes listas. Crea una nueva.</string>
+    <string name="add_to_playlist_add">Añadir</string>
+    <string name="add_to_playlist_new">Nueva lista</string>
+    <string name="create_playlist_title">Nueva lista</string>
+    <string name="create_playlist_title_label">Título</string>
+    <string name="create_playlist_description_label">Descripción</string>
+    <string name="create_playlist_public">Lista pública</string>
+    <string name="create_playlist_confirm">Crear</string>
+    <string name="url_dialog_title">Añadir por enlace de YouTube</string>
+    <string name="url_dialog_field_label">https://www.youtube.com/watch?v=…</string>
+    <string name="url_dialog_add">Añadir</string>
+    <string name="common_cancel">Cancelar</string>
 </resources>

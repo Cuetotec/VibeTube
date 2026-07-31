@@ -1,100 +1,120 @@
 package com.cuetotech.vibetube.player
 
+import android.util.Log
+import android.view.ViewGroup
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.cuetotech.vibetube.R
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.YouTubePlayer
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.listeners.AbstractYouTubePlayerListener
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.options.IFramePlayerOptions
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.utils.loadOrCueVideo
-import com.pierfrancescosoffritti.androidyoutubeplayer.core.player.views.YouTubePlayerView as AndroidYouTubePlayerView
+
+private const val TAG = "VibeTube"
+private const val EMBED_BASE_URL = "https://www.youtube.com/embed/"
+
+private class PlayerRef {
+    var container: ViewGroup? = null
+    var view: WebView? = null
+}
 
 @Composable
 fun YouTubePlayerView(
     videoId: String,
-    isFavorite: Boolean,
-    onToggleFavorite: () -> Unit,
+    onAddSong: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val lifecycleOwner = LocalLifecycleOwner.current
-
-    var playerView by remember { mutableStateOf<AndroidYouTubePlayerView?>(null) }
-    var youTubePlayer by remember { mutableStateOf<YouTubePlayer?>(null) }
+    // El estado del WebView vive en remember: nunca se re-crea en cada ciclo de
+    // recomposición. El contenedor tiene tamaño fijo (fillMaxWidth + height 220.dp)
+    // impuesto por el llamador.
+    val playerRef = remember { PlayerRef() }
 
     Box(modifier = modifier) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                AndroidYouTubePlayerView(ctx).apply {
-                    enableAutomaticInitialization = false
-
-                    lifecycleOwner.lifecycle.addObserver(this)
-
-                    val options = IFramePlayerOptions.Builder(ctx)
-                        .controls(1)
-                        .autoplay(0)
-                        .ivLoadPolicy(3)
-                        .build()
-
-                    val listener = object : AbstractYouTubePlayerListener() {
-                        override fun onReady(player: YouTubePlayer) {
-                            youTubePlayer = player
-                        }
-                    }
-
-                    initialize(listener, options)
-                    playerView = this
+                FrameLayout(ctx).apply {
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                    playerRef.container = this
                 }
             },
+            update = {},
         )
 
         IconButton(
-            onClick = onToggleFavorite,
+            onClick = onAddSong,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(8.dp)
                 .background(Color.Black.copy(alpha = 0.6f), CircleShape),
         ) {
             Icon(
-                imageVector = if (isFavorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                contentDescription = stringResource(
-                    if (isFavorite) R.string.player_remove_favorite else R.string.player_add_favorite,
-                ),
-                tint = if (isFavorite) Color(0xFF1DB954) else Color.White,
+                imageVector = Icons.Filled.Add,
+                contentDescription = stringResource(R.string.player_add_to_playlist),
+                tint = Color.White,
             )
         }
     }
 
-    LaunchedEffect(youTubePlayer, videoId) {
-        youTubePlayer?.loadOrCueVideo(lifecycleOwner.lifecycle, videoId, 0f)
-    }
-
-    DisposableEffect(lifecycleOwner) {
+    // Solo se (re)crea el WebView cuando videoId cambia realmente. Al salir de la
+    // pantalla (o al cambiar de vídeo) onDispose libera el WebView con destroy().
+    DisposableEffect(videoId) {
+        val container = playerRef.container
+        if (videoId.isNotBlank() && container != null) {
+            runCatching {
+                val webView = WebView(container.context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    settings.loadWithOverviewMode = true
+                    settings.useWideViewPort = true
+                    webViewClient = WebViewClient()
+                    webChromeClient = WebChromeClient()
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                }
+                container.addView(
+                    webView,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                playerRef.view = webView
+                Log.d(TAG, "Cargando reproductor con ID: $videoId")
+                webView.loadUrl(EMBED_BASE_URL + videoId + "?autoplay=1")
+            }.onFailure { exception ->
+                Log.e(TAG, "No se pudo inicializar el WebView", exception)
+            }
+        }
         onDispose {
-            playerView?.release()
-            playerView = null
+            Log.d(TAG, "Liberando reproductor con ID: $videoId")
+            runCatching {
+                playerRef.view?.let { webView ->
+                    webView.stopLoading()
+                    webView.loadUrl("about:blank")
+                    if (webView.parent != null) {
+                        (webView.parent as? ViewGroup)?.removeView(webView)
+                    }
+                    webView.destroy()
+                }
+                playerRef.view = null
+            }
         }
     }
 }

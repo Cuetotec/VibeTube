@@ -1,53 +1,89 @@
 # Memoria del proyecto — VibeTube
 
-Reproductor de música para Android (Kotlin + Jetpack Compose) que reproduce vídeos de YouTube y sincroniza los favoritos del usuario con Firebase Firestore.
+Plataforma de música personalizada y social para Android (Kotlin + Jetpack Compose) que reproduce vídeos de YouTube y sincroniza usuarios, perfiles y listas de reproducción con Firebase.
 
 ## Estado actual (avances hasta ahora)
 
 ### Arquitectura
-- Patrón MVVM: capa `data/` (repositorios y modelos), capa `ui/` (pantallas Compose + ViewModels).
+- Patrón MVVM: capa `data/` (modelos y repositorios), capa `ui/` (pantallas Compose + ViewModels).
 - El reproductor se encuentra en el paquete `com.cuetotech.vibetube.player`.
+- ViewModels compartidos por ámbito de Activity (`viewModel()`), lo que permite compartir estado entre pestañas y diálogos.
 - Tema oscuro estilo YouTube Music/Spotify: fondo `#0F0F0F`, superficies `#121212`/`#1E1E1E`, acento rojo `#FF0033`.
 
 ### Dependencias
-- `firebase-firestore` y `firebase-auth` gestionadas por `firebase-bom` (34.16.0) en `gradle/libs.versions.toml` y `app/build.gradle.kts`.
-- `androidx-compose-material-icons-core` para los iconos (no se usa `material-icons-extended`).
+- `firebase-firestore`, `firebase-auth` (gestionadas por `firebase-bom` 34.16.0).
+- `coil-compose` (2.7.0) para imágenes remotas (miniaturas, avatar, banner).
+- `androidx-compose-material-icons-core` y `material-icons-extended`.
+- `kotlinx-coroutines-play-services` para `tasks.await()`.
+- **Eliminada** `androidyoutubeplayer-core` (librería pesada de `pierfrancescosoffritti`): el reproductor ahora usa el `WebView` estándar de Android.
 
-### Catálogo de canciones (`SongRepository`)
-- Lee la colección `songs` de Firestore con `FirebaseFirestore.getInstance()` + `tasks.await()`.
-- `getSongs()` mapea cada documento a `Song(id, youtubeId, title, artist, durationSeconds)`.
+### Autenticación (Email + Contraseña)
+- `AuthRepository`: `signIn`, `signUp`, `signOut` y `authState()` (Flow en tiempo real del usuario actual).
+- `AuthViewModel`: formulario Login/Registro con validación y errores mapeados (email ya registrado, credenciales incorrectas, etc.).
+- `AuthScreen`: toggle Login/Registro, nombre (solo registro), mostrar/ocultar contraseña, estado de carga.
+- El perfil se crea automáticamente en Firestore al registrar (y si no existe al iniciar sesión).
 
-### Búsqueda y reproductor (pantalla de inicio)
-- Búsqueda en tiempo real sobre `title`/`artist` con `contains(ignoreCase = true)`.
-- El reproductor carga por defecto la primera canción de la lista; al seleccionar una canción, cambia el vídeo.
+### Perfil de usuario (`UserProfile`)
+- Documento `users/{uid}` con `uid`, `displayName`, `email`, `avatarUrl`, `bannerUrl`.
+- `UserProfileRepository`: `getUserProfile(uid)` y `saveUserProfile(profile)`.
 
-### Galería / Mi Colección (favoritos sincronizados con Firestore)
-- `FavoritesRepository`:
-  - Login anónimo con Firebase (`signInAnonymously`).
-  - Colección `users/{userId}/favorites/{songId}` en Firestore.
-  - CRUD: `addFavorite(song)` y `removeFavorite(songId)`.
-  - Listener en tiempo real (`addSnapshotListener`) expuesto como `Flow<List<Song>>`.
-- `CollectionViewModel`:
-  - Estado `Loading / Success / Error` con reintento.
-  - Expone `favoriteIds: StateFlow<Set<String>>` actualizado en tiempo real.
-  - `toggleFavorite(song)` para añadir/quitar favoritos.
-- `CollectionScreen` ("Mi Colección"):
-  - Muestra la lista de canciones favoritas.
-  - Estado vacío con mensaje guía.
-  - Botón de corazón para quitar de la colección.
-- `YouTubePlayerView`:
-  - Overlay de corazón sobre el reproductor (relleno si es favorito, contorno si no).
-- `SongItem`:
-  - Nuevo slot `trailingContent` para añadir el corazón a cada canción de la lista.
-- `HomeScreen`:
-  - Corazón en el reproductor y en cada canción de la lista; refleja el estado en tiempo real.
-- `MainActivity`:
-  - Barra de navegación inferior con dos pestañas: **Inicio** y **Mi Colección**.
-- `strings.xml`: recursos para pestañas, colección vacía, y acciones de favorito.
+### Pantalla principal (Inicio)
+- Cabecera de perfil compacta: banner/portada (foto o gradiente), avatar (foto o iniciales), nombre y email, con botón de cerrar sesión.
+- **Buscador de YouTube** en la parte principal: búsqueda por nombre de canciones o vídeos.
+- Cada resultado incluye un botón **'+'** que abre el diálogo para elegir en qué lista guardarlo.
+- Acción adicional "Por enlace" para pegar una URL de YouTube directamente.
+- (Eliminados del Inicio: la sección de 'Mis listas' y el botón 'Crear nueva lista'.)
+
+### Búsqueda de YouTube (API Data v3)
+- `YouTubeSearchRepository`:
+  - `search(query)`: usa el endpoint `search.list` para obtener vídeo, título y canal.
+  - Segundo lote de llamadas `videos.list` (part `contentDetails`) para la duración (ISO 8601 → segundos).
+  - La API key se lee de `local.properties` (`YOUTUBE_API_KEY`) y se expone vía `BuildConfig.YOUTUBE_API_KEY` (`buildConfig = true`).
+  - Si no hay key configurada, muestra el error correspondiente.
+- Se ha **eliminado el catálogo de prueba** (`songs` de Firestore y `SongRepository`/`SongViewModel`); ya no hay vídeos/canciones precargadas.
+
+### Gestión de Listas de reproducción (playlists)
+- Colección `playlists/{playlistId}` con `ownerId`, `title`, `description`, `isPublic`, `tracks` (array de canciones) y `createdAt`.
+- `PlaylistRepository`: `createPlaylist`, `deletePlaylist`, `observeUserPlaylists` (snapshot en tiempo real), `addTrack` (`arrayUnion`, sin duplicados) y `removeTrack`.
+- `PlaylistsViewModel` (compartido):
+  - Observa las listas del usuario actual (`flatMapLatest` al cambiar de usuario).
+  - Estado de reproducción: `selectedPlaylistId` y `selectedTrackId`.
+  - Diálogos: canción pendiente de añadir, nueva lista, enlace URL.
+
+### Pantalla Mis Listas
+- Listado de listas con título, descripción, nº de canciones, badge Pública/Privada, botón eliminar y botón **Nueva** (crear lista). **La lista general NO instancia ningún reproductor de vídeo**: solo texto/tarjetas ligeras.
+- Al pulsar una lista se abre su **detalle con el reproductor integrado**:
+  - El reproductor reproduce la primera canción (o la seleccionada).
+  - Tocar una canción la reproduce al instante (se resalta en color primario).
+  - Cada canción tiene botón para quitarla de la lista (el reproductor pasa a la siguiente).
+  - El botón flotante del reproductor permite añadir la canción en reproducción a otra lista.
+  - `BackHandler` vuelve al listado.
+- **Robustez / anti-crash**:
+  - **Reproductor ligero (WebView estándar)**: `player/YouTubePlayerView.kt` carga el embed `https://www.youtube.com/embed/{videoId}?autoplay=1` en un `android.webkit.WebView` único (sin librerías externas). `javaScriptEnabled = true`, `domStorageEnabled` y `mediaPlaybackRequiresUserGesture=false`; `WebViewClient` + `WebChromeClient`; fondo negro.
+  - **Creación única por detalle**: el contenedor (`FrameLayout`) se crea en el `factory` de la `AndroidView` (una vez por composición) y la referencia vive en `remember { PlayerRef() }`; el `WebView` se añade como hijo dentro de `DisposableEffect(videoId)`, por lo que **solo se (re)crea/carga cuando cambia el `videoId`**, nunca en cada recomposición.
+  - **Liberación al salir**: `onDispose` del `DisposableEffect(videoId)` hace `stopLoading()` + `loadUrl("about:blank")` + desattach + `destroy()` envuelto en `runCatching`, tanto al salir de la pantalla como al cambiar de vídeo; la creación del `WebView` va en `runCatching` (ante un fallo se queda el contenedor negro).
+  - **Lazy loading estricto**: el reproductor solo se instancia cuando la lista tiene vídeos y `selectedTrackId` resuelve a una canción con `youtubeId.isNotBlank()`. Si la lista está vacía → **"Esta lista no tiene vídeos añadidos"**; si tiene vídeos pero no hay selección → **"Selecciona un vídeo para reproducir"** (nunca se renderiza el reproductor).
+  - **Dimensiones fijas**: `Box` del reproductor con `fillMaxWidth().height(220.dp)`.
+  - **Click en la lista**: `SongItem` → `onSelectTrack` → `selectTrack(id)` del ViewModel actualiza `selectedTrackId` y el reproductor carga el nuevo vídeo.
+  - **ViewModel blindado**: `observePlaylists` guarda el `Job` y lo cancela antes de lanzar uno nuevo (`observeJob?.cancel()`), evitando acumular listeners de Firestore si se pulsa "Reintentar" varias veces; usa `flatMapLatest` y `distinctUntilChanged`, `try-catch` reintentando `CancellationException`. `_uiState` es un `data class` (dedupe por igualdad en `StateFlow` → sin recomposiciones redundantes).
+- Los diálogos (añadir a lista, nueva lista, enlace URL) se muestran a nivel de `MainActivity`.
+
+### Navegación
+- Gate de autenticación: sin sesión → `AuthScreen`; con sesión → `Scaffold` con `NavigationBar` de **2 pestañas**: **Inicio** (perfil + búsqueda) y **Mis Listas** (playlists + reproductor).
+- Se ha eliminado la pestaña 'Buscar' de la barra inferior.
+
+### Enlace URL
+- `YouTubeLinkParser`: `extractVideoId` (formato `watch`, `youtu.be`, `/embed/`, `/shorts/`, `/live/`) y `fetchVideoInfo` vía oembed de YouTube (sin API key) para obtener título y canal.
 
 ### Comandos útiles
 - Build: `./gradlew :app:assembleDebug`
 - Tests unitarios: `./gradlew :app:testDebugUnitTest`
 
+### Configuración necesaria
+- Para el buscador de YouTube: añadir a `local.properties` (no se sube a git) la línea `YOUTUBE_API_KEY=TU_API_KEY` (YouTube Data API v3).
+
 ## Pendiente / ideas
-- (por definir en próximas iteraciones)
+- Reproducción automática de la siguiente canción al terminar.
+- Editar listas (título/descripción, toggle público).
+- Subir imagen de avatar/banner (Firebase Storage).
+- Perfiles y listas públicas de otros usuarios (red social).

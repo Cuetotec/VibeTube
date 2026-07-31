@@ -1,4 +1,4 @@
-package com.cuetotech.vibetube.ui.home.components
+package com.cuetotech.vibetube.ui.components
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,6 +25,7 @@ fun SongItem(
     song: Song,
     modifier: Modifier = Modifier,
     onClick: () -> Unit = {},
+    highlighted: Boolean = false,
     trailingContent: @Composable () -> Unit = {},
 ) {
     Row(
@@ -51,6 +52,11 @@ fun SongItem(
             Text(
                 text = song.title,
                 style = MaterialTheme.typography.titleMedium,
+                color = if (highlighted) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

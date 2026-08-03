@@ -5,16 +5,23 @@ import androidx.lifecycle.viewModelScope
 import com.cuetotech.vibetube.data.AuthRepository
 import com.cuetotech.vibetube.data.Playlist
 import com.cuetotech.vibetube.data.PlaylistRepository
+import com.cuetotech.vibetube.data.SavedCollection
+import com.cuetotech.vibetube.data.SavedCollectionsRepository
+import com.cuetotech.vibetube.data.SavedPlaylist
 import com.cuetotech.vibetube.data.Song
 import com.cuetotech.vibetube.data.YouTubeLinkParser
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.launch
 
@@ -24,10 +31,11 @@ data class PlaylistsUiState(
     val error: String? = null,
 )
 
-@OptIn(ExperimentalCoroutinesApi::class)
+@OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class PlaylistsViewModel(
     private val authRepository: AuthRepository = AuthRepository(),
     private val playlistRepository: PlaylistRepository = PlaylistRepository(),
+    private val savedCollectionsRepository: SavedCollectionsRepository = SavedCollectionsRepository(),
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(PlaylistsUiState(isLoading = true))
@@ -38,6 +46,15 @@ class PlaylistsViewModel(
 
     private val _selectedTrackId = MutableStateFlow<String?>(null)
     val selectedTrackId: StateFlow<String?> = _selectedTrackId.asStateFlow()
+
+    private val _savedPlaylists = MutableStateFlow<List<SavedPlaylist>>(emptyList())
+    val savedPlaylists: StateFlow<List<SavedPlaylist>> = _savedPlaylists.asStateFlow()
+
+    private val _selectedSavedId = MutableStateFlow<String?>(null)
+    val selectedSavedId: StateFlow<String?> = _selectedSavedId.asStateFlow()
+
+    private val _selectedSavedTrackId = MutableStateFlow<String?>(null)
+    val selectedSavedTrackId: StateFlow<String?> = _selectedSavedTrackId.asStateFlow()
 
     private val _pendingSong = MutableStateFlow<Song?>(null)
     val pendingSong: StateFlow<Song?> = _pendingSong.asStateFlow()
@@ -58,10 +75,12 @@ class PlaylistsViewModel(
 
     init {
         observePlaylists()
+        observeSavedPlaylists()
     }
 
     fun retry() {
         observePlaylists()
+        observeSavedPlaylists()
     }
 
     fun openPlaylist(playlistId: String) {
@@ -77,6 +96,34 @@ class PlaylistsViewModel(
 
     fun selectTrack(songId: String) {
         _selectedTrackId.value = songId
+    }
+
+    fun openSavedPlaylist(savedPlaylistId: String) {
+        _selectedSavedId.value = savedPlaylistId
+        val saved = _savedPlaylists.value.find { it.playlist.id == savedPlaylistId }
+        _selectedSavedTrackId.value = saved?.playlist?.tracks?.firstOrNull()?.id
+    }
+
+    fun closeSavedPlaylist() {
+        _selectedSavedId.value = null
+        _selectedSavedTrackId.value = null
+    }
+
+    fun selectSavedTrack(songId: String) {
+        _selectedSavedTrackId.value = songId
+    }
+
+    fun unsavePlaylist(savedPlaylistId: String) {
+        viewModelScope.launch {
+            runCatching {
+                val myUid = authRepository.currentUser()?.uid ?: error("Sesión no iniciada")
+                savedCollectionsRepository.removeCollection(myUid, savedPlaylistId)
+            }.onSuccess {
+                if (_selectedSavedId.value == savedPlaylistId) {
+                    closeSavedPlaylist()
+                }
+            }
+        }
     }
 
     fun openAddSongDialog(song: Song) {
@@ -206,5 +253,45 @@ class PlaylistsViewModel(
                 )
             }
         }
+    }
+
+    private fun observeSavedPlaylists() {
+        viewModelScope.launch {
+            try {
+                authRepository.authState()
+                    .mapNotNull { it?.uid }
+                    .distinctUntilChanged()
+                    .flatMapLatest { uid ->
+                        savedCollectionsRepository.observeSavedCollections(uid)
+                            .flatMapLatest { collections -> savedPlaylistsFlow(collections) }
+                    }
+                    .collect { saved -> _savedPlaylists.value = saved }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                // Las colecciones guardadas son complementarias; se ignora el error de observación.
+            }
+        }
+    }
+
+    private fun savedPlaylistsFlow(collections: List<SavedCollection>) = if (collections.isEmpty()) {
+        flowOf(emptyList())
+    } else {
+        val flows = collections.map { collection ->
+            playlistRepository.observePublicPlaylist(collection.playlistId)
+                .map { playlist ->
+                    if (playlist == null) {
+                        null
+                    } else {
+                        SavedPlaylist(
+                            playlist = playlist,
+                            ownerDisplayName = collection.ownerDisplayName,
+                            ownerPhotoUrl = collection.ownerPhotoUrl,
+                            savedAt = collection.savedAt,
+                        )
+                    }
+                }
+        }
+        combine(flows) { savedList -> savedList.filterNotNull() }
     }
 }

@@ -1,10 +1,8 @@
 package com.cuetotech.vibetube.data
 
-data class UserProfile(
+data class Friend(
     val uid: String,
     val displayName: String,
-    val email: String,
-    val avatarUrl: String? = null,
-    val bannerUrl: String? = null,
+    val email: String = "",
     val photoUrl: String? = null,
 )

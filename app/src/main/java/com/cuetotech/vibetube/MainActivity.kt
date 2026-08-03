@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -48,6 +49,7 @@ import com.cuetotech.vibetube.data.Playlist
 import com.cuetotech.vibetube.data.Song
 import com.cuetotech.vibetube.ui.auth.AuthScreen
 import com.cuetotech.vibetube.ui.auth.AuthViewModel
+import com.cuetotech.vibetube.ui.friends.FriendsScreen
 import com.cuetotech.vibetube.ui.home.HomeScreen
 import com.cuetotech.vibetube.ui.playlists.PlaylistsViewModel
 import com.cuetotech.vibetube.ui.playlists.PlaylistsScreen
@@ -104,9 +106,11 @@ private fun MainScreen() {
         val contentModifier = Modifier.padding(innerPadding)
         when (selectedTab) {
             AppTab.HOME -> HomeScreen(modifier = contentModifier)
+            AppTab.FRIENDS -> FriendsScreen(modifier = contentModifier)
             AppTab.PLAYLISTS -> PlaylistsScreen(
                 modifier = contentModifier,
                 onBrowse = { selectedTab = AppTab.HOME },
+                onGoToFriends = { selectedTab = AppTab.FRIENDS },
             )
         }
     }
@@ -343,5 +347,6 @@ private enum class AppTab(
     val labelRes: Int,
 ) {
     HOME(Icons.Filled.Home, R.string.tab_home),
+    FRIENDS(Icons.Filled.Group, R.string.tab_friends),
     PLAYLISTS(Icons.Filled.Star, R.string.tab_playlists),
 }

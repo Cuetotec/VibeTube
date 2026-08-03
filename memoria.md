@@ -24,8 +24,8 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - El perfil se crea automáticamente en Firestore al registrar (y si no existe al iniciar sesión).
 
 ### Perfil de usuario (`UserProfile`)
-- Documento `users/{uid}` con `uid`, `displayName`, `email`, `avatarUrl`, `bannerUrl`.
-- `UserProfileRepository`: `getUserProfile(uid)` y `saveUserProfile(profile)`.
+- Documento `users/{uid}` con `uid`, `displayName`, `email`, `avatarUrl`, `bannerUrl`, `photoUrl`.
+- `UserProfileRepository`: `getUserProfile(uid)`, `saveUserProfile(profile)` y `searchUsers(query, excludeUid, limit)` (búsqueda local de la colección `users` por nombre o email).
 
 ### Pantalla principal (Inicio)
 - Cabecera de perfil compacta: banner/portada (foto o gradiente), avatar (foto o iniciales), nombre y email, con botón de cerrar sesión.
@@ -50,13 +50,15 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
   - Estado de reproducción: `selectedPlaylistId` y `selectedTrackId`.
   - Diálogos: canción pendiente de añadir, nueva lista, enlace URL.
 
-### Pantalla Mis Listas
-- Listado de listas con título, descripción, nº de canciones, badge Pública/Privada, botón eliminar y botón **Nueva** (crear lista). **La lista general NO instancia ningún reproductor de vídeo**: solo texto/tarjetas ligeras.
+### Pantalla Mis Colecciones
+- **Dos secciones** dentro de la pestaña Mis Colecciones:
+  - **Mis listas**: listas propias con título, descripción, nº de canciones, badge Pública/Privada, botón eliminar y botón **Nueva** (crear lista). **La lista general NO instancia ningún reproductor de vídeo**: solo texto/tarjetas ligeras.
+  - **Colecciones guardadas**: listas públicas de amigos guardadas, etiquetadas con "Lista de {nombre}", con botón para quitarlas. Si solo hay colecciones guardadas se muestra un enlace a la pestaña **Amigos**.
 - Al pulsar una lista se abre su **detalle con el reproductor integrado**:
   - El reproductor reproduce la primera canción (o la seleccionada).
   - Tocar una canción la reproduce al instante (se resalta en color primario).
   - Cada canción tiene botón para quitarla de la lista (el reproductor pasa a la siguiente).
-  - El botón flotante del reproductor permite añadir la canción en reproducción a otra lista.
+  - El botón flotante del reproductor permite añadir la canción en reproducción a otra lista (**solo en listas propias**; en colecciones guardadas el detalle es de solo lectura, sin quitar canciones ni botón '+', y con opción de dejar de seguir la colección).
   - `BackHandler` vuelve al listado.
 - **Robustez / anti-crash**:
   - **Reproductor ligero (WebView estándar)**: `player/YouTubePlayerView.kt` carga el embed `https://www.youtube.com/embed/{videoId}?autoplay=1` en un `android.webkit.WebView` único (sin librerías externas). `javaScriptEnabled = true`, `domStorageEnabled` y `mediaPlaybackRequiresUserGesture=false`; `WebViewClient` + `WebChromeClient`; fondo negro.
@@ -73,9 +75,21 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
   - **ViewModel blindado**: `observePlaylists` guarda el `Job` y lo cancela antes de lanzar uno nuevo (`observeJob?.cancel()`), evitando acumular listeners de Firestore si se pulsa "Reintentar" varias veces; usa `flatMapLatest` y `distinctUntilChanged`, `try-catch` reintentando `CancellationException`. `_uiState` es un `data class` (dedupe por igualdad en `StateFlow` → sin recomposiciones redundantes).
 - Los diálogos (añadir a lista, nueva lista, enlace URL) se muestran a nivel de `MainActivity`.
 
+### Amigos y red social
+- **Solicitudes de amistad** (`friend_requests/{requestId}`): documento con `fromUid`, `toUid`, `fromName`, `fromPhotoUrl`, `status` (`pending`/`accepted`/`rejected`) y `createdAt`. Consultas por `whereEqualTo("toUid", uid)` / `whereEqualTo("fromUid", uid)` filtrando `status` en cliente (evita índices compuestos).
+- **Amigos** (`users/{uid}/friends/{friendUid}`): snapshot del amigo (`displayName`, `email`, `photoUrl`, `addedAt`) escrito en **ambas** direcciones al aceptar; `removeFriend` borra ambos documentos.
+- `FriendshipRepository`: `sendFriendRequest` (detecta "ya amigos", "ya pendiente" y **auto-acepta** si existe solicitud inversa), `acceptRequest`, `rejectRequest`, `removeFriend`, `observeIncomingRequests`, `observeFriends`.
+- **Pestaña Amigos** (`FriendsScreen` + `FriendsViewModel`):
+  - Buscador de personas por nombre o email (debounce 350ms) con botón **Añadir** → envía solicitud.
+  - **Solicitudes recibidas** con botones Aceptar/Rechazar.
+  - **Lista de amigos** → al tocarla abre el **perfil público** (con `BackHandler`).
+  - `AppSnackbarMessages` (componente compartido en `ui/components/`) muestra los mensajes de estado.
+- **Perfil público** (`FriendProfileScreen` + `FriendProfileViewModel`): avatar (foto o iniciales), nombre, email y **listas públicas** del amigo (`observePublicPlaylists` reusa `observeUserPlaylists` filtrando `isPublic` en cliente). Cada lista tiene botón Guardar/Quitar (bookmark).
+- **Colecciones guardadas** (`users/{uid}/savedCollections/{playlistId}`): referencia `{playlistId, ownerId, ownerDisplayName, ownerPhotoUrl, savedAt}`. `SavedCollectionsRepository`: `saveCollection`, `removeCollection`, `observeSavedCollections`.
+- `PlaylistsViewModel` combina las colecciones guardadas con el contenido real de cada lista vía `observePublicPlaylist` (si el dueño borra o hace privada la lista, desaparece de Mis Colecciones).
+
 ### Navegación
-- Gate de autenticación: sin sesión → `AuthScreen`; con sesión → `Scaffold` con `NavigationBar` de **2 pestañas**: **Inicio** (perfil + búsqueda) y **Mis Listas** (playlists + reproductor).
-- Se ha eliminado la pestaña 'Buscar' de la barra inferior.
+- Gate de autenticación: sin sesión → `AuthScreen`; con sesión → `Scaffold` con `NavigationBar` de **3 pestañas**: **Inicio** (perfil + búsqueda), **Amigos** (red social) y **Mis Colecciones** (listas propias + guardadas + reproductor).
 
 ### Enlace URL
 - `YouTubeLinkParser`: `extractVideoId` (formato `watch`, `youtu.be`, `/embed/`, `/shorts/`, `/live/`) y `fetchVideoInfo` vía oembed de YouTube (sin API key) para obtener título y canal.
@@ -90,5 +104,5 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 ## Pendiente / ideas
 - Reproducción automática de la siguiente canción al terminar.
 - Editar listas (título/descripción, toggle público).
-- Subir imagen de avatar/banner (Firebase Storage).
-- Perfiles y listas públicas de otros usuarios (red social).
+- Subir imagen de avatar/banner/photo (Firebase Storage).
+- **Reglas de seguridad de Firestore**: revisar y endurecer las reglas (búsqueda de `users`, `friend_requests`, subcolecciones `friends`/`savedCollections`) antes de publicar.

@@ -6,6 +6,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 
 class PlaylistRepository(
@@ -45,6 +46,33 @@ class PlaylistRepository(
             }
         awaitClose { listener.remove() }
     }
+
+    fun observePublicPlaylists(ownerId: String): Flow<List<Playlist>> =
+        observeUserPlaylists(ownerId).filterPublic()
+
+    fun observePublicPlaylist(playlistId: String): Flow<Playlist?> = callbackFlow {
+        val listener = firestore.collection(PLAYLISTS_COLLECTION)
+            .document(playlistId)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    close(error)
+                    return@addSnapshotListener
+                }
+                val playlist = snapshot?.let { document ->
+                    if (document.exists()) document.toPlaylist() else null
+                }?.takeIf { it.isPublic }
+                trySend(playlist)
+            }
+        awaitClose { listener.remove() }
+    }
+
+    suspend fun getPlaylist(playlistId: String): Playlist? {
+        val document = firestore.collection(PLAYLISTS_COLLECTION).document(playlistId).get().await()
+        return document.takeIf { it.exists() }?.toPlaylist()
+    }
+
+    private fun Flow<List<Playlist>>.filterPublic(): Flow<List<Playlist>> =
+        map { playlists -> playlists.filter { it.isPublic } }
 
     suspend fun addTrack(playlistId: String, song: Song) {
         firestore.collection(PLAYLISTS_COLLECTION).document(playlistId)

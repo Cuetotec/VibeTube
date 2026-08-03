@@ -136,6 +136,7 @@ private fun buildPlayerHtml(videoId: String): String {
 fun YouTubePlayerView(
     videoId: String,
     onAddSong: () -> Unit,
+    showAddSong: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -164,18 +165,20 @@ fun YouTubePlayerView(
             )
         }
 
-        IconButton(
-            onClick = onAddSong,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(8.dp)
-                .background(Color.Black.copy(alpha = 0.6f), CircleShape),
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Add,
-                contentDescription = stringResource(R.string.player_add_to_playlist),
-                tint = Color.White,
-            )
+        if (showAddSong) {
+            IconButton(
+                onClick = onAddSong,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .background(Color.Black.copy(alpha = 0.6f), CircleShape),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = stringResource(R.string.player_add_to_playlist),
+                    tint = Color.White,
+                )
+            }
         }
     }
 

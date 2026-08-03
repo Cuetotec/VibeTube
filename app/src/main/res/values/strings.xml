@@ -16,7 +16,8 @@
 
     <!-- Navegación -->
     <string name="tab_home">Inicio</string>
-    <string name="tab_playlists">Mis Listas</string>
+    <string name="tab_friends">Amigos</string>
+    <string name="tab_playlists">Mis Colecciones</string>
 
     <!-- Inicio / Perfil -->
     <string name="profile_sign_out">Cerrar sesión</string>
@@ -36,7 +37,7 @@
     <string name="player_error_open_in_youtube">Abrir en YouTube</string>
 
     <!-- Listas de reproducción -->
-    <string name="playlists_title">Mis Listas</string>
+    <string name="playlists_title">Mis Colecciones</string>
     <string name="playlists_new">Nueva</string>
     <string name="playlists_empty_title">Aún no tienes listas</string>
     <string name="playlists_empty_subtitle">Crea tu primera lista o busca canciones en Inicio para guardarlas.</string>
@@ -51,7 +52,36 @@
     <string name="playlist_select_video_subtitle">Toca un vídeo de la lista para empezar</string>
     <string name="playlist_delete">Eliminar lista</string>
     <string name="playlist_remove_track">Quitar canción de la lista</string>
-    <string name="playlist_back">Volver a mis listas</string>
+    <string name="playlist_back">Volver a mis colecciones</string>
+    <string name="playlist_unsave">Quitar de Mis Colecciones</string>
+    <string name="playlists_own_section">Mis listas</string>
+    <string name="playlists_own_empty">Aún no tienes listas propias</string>
+    <string name="playlists_saved_section">Colecciones guardadas</string>
+    <string name="playlists_saved_owner">Lista de %1$s</string>
+    <string name="playlists_saved_hint">Busca amigos en Amigos y guarda sus listas</string>
+
+    <!-- Amigos -->
+    <string name="friends_title">Amigos</string>
+    <string name="friends_retry">Reintentar</string>
+    <string name="friends_search_placeholder">Buscar personas por nombre o email</string>
+    <string name="friends_search_results">Resultados</string>
+    <string name="friends_search_no_results">No se encontraron personas</string>
+    <string name="friends_request_send">Añadir</string>
+    <string name="friends_request_sent">Enviada</string>
+    <string name="friends_request_accept">Aceptar</string>
+    <string name="friends_request_reject">Rechazar</string>
+    <string name="friends_request_wants">Quiere ser tu amigo</string>
+    <string name="friends_incoming_requests">Solicitudes recibidas</string>
+    <string name="friends_list_title">Tus amigos</string>
+    <string name="friends_empty">Aún no tienes amigos. Busca personas y envía solicitudes.</string>
+    <string name="friends_remove">Eliminar amigo</string>
+    <string name="friend_profile_title">Perfil de amigo</string>
+    <string name="friend_profile_back">Volver a Amigos</string>
+    <string name="friend_profile_avatar">Foto de perfil</string>
+    <string name="friend_profile_public_playlists">Listas públicas</string>
+    <string name="friend_profile_no_public_playlists">Este usuario no tiene listas públicas</string>
+    <string name="friend_profile_save">Guardar lista</string>
+    <string name="friend_profile_unsave">Quitar lista</string>
 
     <!-- Diálogos -->
     <string name="add_to_playlist_title">Añadir a lista</string>

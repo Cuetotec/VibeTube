@@ -32,6 +32,8 @@
     <string name="home_search_results">Resultados</string>
     <string name="home_search_no_results">Sin resultados para «%1$s»</string>
     <string name="player_add_to_playlist">Añadir a una lista</string>
+    <string name="player_error_message">Este vídeo no se puede reproducir dentro de la app.</string>
+    <string name="player_error_open_in_youtube">Abrir en YouTube</string>
 
     <!-- Listas de reproducción -->
     <string name="playlists_title">Mis Listas</string>

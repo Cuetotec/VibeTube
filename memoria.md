@@ -101,6 +101,39 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 ### Configuración necesaria
 - Para el buscador de YouTube: añadir a `local.properties` (no se sube a git) la línea `YOUTUBE_API_KEY=TU_API_KEY` (YouTube Data API v3).
 
+## Proceso de desarrollo (historial)
+
+### Iteración 1 — Base del proyecto (commits en `main`)
+- Configuración inicial: proyecto Android Kotlin + Compose, tema oscuro, Firebase (Auth + Firestore), `coil-compose` e iconos Material.
+- Autenticación con email/contraseña (`AuthScreen`/`AuthViewModel`/`AuthRepository`) con validación y errores mapeados.
+- Perfil automático en `users/{uid}` al registrar o iniciar sesión.
+- Buscador de YouTube (Data API v3, key vía `BuildConfig.YOUTUBE_API_KEY` desde `local.properties`).
+- Playlists en Firestore (`playlists/{id}` con `ownerId`, `isPublic`, `tracks`, `createdAt`) y CRUD desde `PlaylistsViewModel`/`PlaylistsScreen`.
+- Eliminación del catálogo de prueba (`songs`, `SongRepository`, `SongViewModel`) → se sustituye por búsqueda real de YouTube.
+- Commit: `f38771c` — `feat: add email auth, youtube search, playlists and inline video player`.
+
+### Iteración 2 — Reproductor WebView y estabilidad (commits en `main`)
+- Migración del reproductor desde `androidyoutubeplayer-core` (librería pesada) al **WebView estándar** (`player/YouTubePlayerView.kt`): se elimina la dependencia de `libs.versions.toml` y `app/build.gradle.kts`.
+- **Crash SIG:9 investigado**: prueba de aislamiento (reproductor sustituido por un `Text`) confirmó que el crash no provenía del player; se blindó el `PlaylistsViewModel` (`observeJob?.cancel()` para no acumular listeners de Firestore) y el detalle usa selección estricta (`selectedSong = selectedTrackId?.let { tracks.find { ... } }`).
+- **Errores 152/153 del reproductor resueltos**: causa raíz = usar `https://www.youtube.com` como origen del iframe (mismo origen que YouTube → configuración rechazada). Solución: origen propio `PLAYER_ORIGIN = "https://${BuildConfig.APPLICATION_ID}"` como base URL de `loadDataWithBaseURL` y `playerVars.origin`, `Referer` propio, `strict-origin-when-cross-origin`, `playsinline`, cache desactivada + `clearCache`/`clearHistory`, User-Agent normalizado (sin `; wv`, `Chrome/120`), `mediaPlaybackRequiresUserGesture=false` y overlay de error "Abrir en YouTube" sin reintentos en bucle.
+- Confirmación del usuario: la pantalla 'Mis Listas' y el manejo de datos funcionaban correctamente.
+- Commit: `f389230` — `fix(player): resolve YouTube WebView playback errors (152/153) and refine error handling`.
+
+### Iteración 3 — Módulo social: 3 pestañas, amigos y colecciones guardadas (commit en `main`)
+- **Navegación a 3 pestañas** en `MainActivity`: Inicio | Amigos | Mis Colecciones (antes Inicio | Mis Listas).
+- **Modelos nuevos**: `Friend`, `IncomingFriendRequest`, `SavedCollection`, `SavedPlaylist`; `UserProfile` + `photoUrl`.
+- **Repositorios nuevos**:
+  - `UserProfileRepository.searchUsers` (búsqueda por nombre/email sobre `users`).
+  - `FriendshipRepository` (`friend_requests` + subcolección `users/{uid}/friends` con snapshot en ambas direcciones; consultas de un solo campo para evitar índices compuestos; auto-aceptación de solicitud inversa).
+  - `SavedCollectionsRepository` (`users/{uid}/savedCollections/{playlistId}`).
+  - `PlaylistRepository.observePublicPlaylists` / `observePublicPlaylist` (reusan la observación de `observeUserPlaylists` filtrando `isPublic` en cliente).
+- **Pestaña Amigos**: buscador con debounce 350ms y botón Añadir, solicitudes recibidas (Aceptar/Rechazar), lista de amigos que abre el **perfil público** (`FriendProfileScreen`, `viewModel(key = friendUid)`), con listas públicas y botón Guardar/Quitar.
+- **Mis Colecciones**: secciones "Mis listas" + "Colecciones guardadas" etiquetadas "Lista de X"; detalle de colección guardada en **solo lectura** (sin quitar canciones ni botón '+' — se añadió `showAddSong` a `YouTubePlayerView` — y con opción de dejar de seguir). Si el dueño borra o hace privada la lista, desaparece automáticamente.
+- **Componente compartido** `ui/components/AppSnackbarMessages.kt` para mensajes de estado.
+- **Tests**: `YouTubeLinkParserTest` (extracción de IDs de URL en formatos `watch`/`youtu.be`/`embed`/`shorts` + casos negativos).
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde al final de cada iteración.
+- Commit: `72228e4` — `feat(social): añadir navegación de 3 pestañas, módulo de amigos, perfiles públicos y colecciones guardadas`.
+
 ## Pendiente / ideas
 - Reproducción automática de la siguiente canción al terminar.
 - Editar listas (título/descripción, toggle público).

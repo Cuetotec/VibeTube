@@ -2,6 +2,7 @@ package com.cuetotech.vibetube
 
 import android.graphics.Color
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -33,14 +34,17 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -121,6 +125,18 @@ private fun MainScreen() {
     val isUrlProcessing by playlistsViewModel.isUrlProcessing.collectAsState()
     val urlError by playlistsViewModel.urlError.collectAsState()
     val playlistsUiState by playlistsViewModel.uiState.collectAsState()
+    val editingPlaylist by playlistsViewModel.editingPlaylist.collectAsState()
+    val toastMessage by playlistsViewModel.toastMessage.collectAsState()
+
+    // Toast directo con el error de Firestore al añadir canciones: muestra el
+    // mensaje real (reglas de seguridad, red, etc.) y limpia el evento.
+    val context = LocalContext.current
+    LaunchedEffect(toastMessage) {
+        toastMessage?.let { message ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            playlistsViewModel.clearToastMessage()
+        }
+    }
 
     pendingSong?.let { song ->
         AddToPlaylistDialog(
@@ -136,6 +152,14 @@ private fun MainScreen() {
         CreatePlaylistDialog(
             onConfirm = playlistsViewModel::createPlaylist,
             onDismiss = playlistsViewModel::dismissCreateDialog,
+        )
+    }
+
+    editingPlaylist?.let { playlist ->
+        EditPlaylistDialog(
+            playlist = playlist,
+            onConfirm = playlistsViewModel::updatePlaylist,
+            onDismiss = playlistsViewModel::dismissEditDialog,
         )
     }
 
@@ -279,6 +303,66 @@ private fun CreatePlaylistDialog(
                 enabled = title.isNotBlank(),
             ) {
                 Text(stringResource(R.string.create_playlist_confirm))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.common_cancel))
+            }
+        },
+    )
+}
+
+@Composable
+private fun EditPlaylistDialog(
+    playlist: Playlist,
+    onConfirm: (String, String, Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var title by remember(playlist.id) { mutableStateOf(playlist.title) }
+    var description by remember(playlist.id) { mutableStateOf(playlist.description) }
+    var isPublic by remember(playlist.id) { mutableStateOf(playlist.isPublic) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.edit_playlist_title)) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text(stringResource(R.string.edit_playlist_title_label)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(modifier = Modifier.padding(top = 12.dp))
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text(stringResource(R.string.edit_playlist_description_label)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = stringResource(R.string.edit_playlist_public),
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(checked = isPublic, onCheckedChange = { isPublic = it })
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(title, description, isPublic) },
+                enabled = title.isNotBlank(),
+            ) {
+                Text(stringResource(R.string.edit_playlist_save))
             }
         },
         dismissButton = {

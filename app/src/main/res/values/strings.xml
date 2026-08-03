@@ -51,9 +51,15 @@
     <string name="playlist_select_video_title">Selecciona un vídeo para reproducir</string>
     <string name="playlist_select_video_subtitle">Toca un vídeo de la lista para empezar</string>
     <string name="playlist_delete">Eliminar lista</string>
+    <string name="playlist_edit">Editar lista</string>
     <string name="playlist_remove_track">Quitar canción de la lista</string>
     <string name="playlist_back">Volver a mis colecciones</string>
     <string name="playlist_unsave">Quitar de Mis Colecciones</string>
+    <string name="edit_playlist_title">Editar lista</string>
+    <string name="edit_playlist_title_label">Título</string>
+    <string name="edit_playlist_description_label">Descripción</string>
+    <string name="edit_playlist_public">Lista pública</string>
+    <string name="edit_playlist_save">Guardar</string>
     <string name="playlists_own_section">Mis listas</string>
     <string name="playlists_own_empty">Aún no tienes listas propias</string>
     <string name="playlists_saved_section">Colecciones guardadas</string>

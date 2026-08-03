@@ -21,6 +21,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -58,10 +59,9 @@ fun PlaylistsScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val selectedPlaylistId by viewModel.selectedPlaylistId.collectAsState()
-    val selectedTrackId by viewModel.selectedTrackId.collectAsState()
+    val currentSong by viewModel.currentSong.collectAsState()
     val savedPlaylists by viewModel.savedPlaylists.collectAsState()
     val selectedSavedId by viewModel.selectedSavedId.collectAsState()
-    val selectedSavedTrackId by viewModel.selectedSavedTrackId.collectAsState()
 
     val selectedPlaylist = uiState.playlists.find { it.id == selectedPlaylistId }
     val selectedSaved = savedPlaylists.find { it.playlist.id == selectedSavedId }
@@ -103,11 +103,12 @@ fun PlaylistsScreen(
 
         selectedSaved != null -> PlaylistDetail(
             playlist = selectedSaved.playlist,
-            selectedTrackId = selectedSavedTrackId,
+            currentSong = currentSong,
             ownerLabel = selectedSaved.ownerDisplayName,
             isSaved = true,
             onBack = viewModel::closeSavedPlaylist,
             onSelectTrack = viewModel::selectSavedTrack,
+            onEnded = viewModel::playNextSavedTrack,
             onUnsave = { viewModel.unsavePlaylist(selectedSaved.playlist.id) },
             onBrowse = onBrowse,
             modifier = modifier,
@@ -115,10 +116,11 @@ fun PlaylistsScreen(
 
         selectedPlaylist != null -> PlaylistDetail(
             playlist = selectedPlaylist,
-            selectedTrackId = selectedTrackId,
+            currentSong = currentSong,
             isSaved = false,
             onBack = viewModel::closePlaylist,
             onSelectTrack = viewModel::selectTrack,
+            onEnded = viewModel::playNextTrack,
             onRemoveTrack = { songId -> viewModel.removeTrack(selectedPlaylist.id, songId) },
             onAddSong = viewModel::openAddSongDialog,
             onBrowse = onBrowse,
@@ -131,6 +133,7 @@ fun PlaylistsScreen(
             onCreatePlaylist = viewModel::openCreateDialog,
             onOpenPlaylist = viewModel::openPlaylist,
             onDeletePlaylist = viewModel::deletePlaylist,
+            onEditPlaylist = viewModel::openEditDialog,
             onOpenSaved = viewModel::openSavedPlaylist,
             onUnsave = viewModel::unsavePlaylist,
             onBrowse = onBrowse,
@@ -147,6 +150,7 @@ private fun PlaylistsList(
     onCreatePlaylist: () -> Unit,
     onOpenPlaylist: (String) -> Unit,
     onDeletePlaylist: (String) -> Unit,
+    onEditPlaylist: (Playlist) -> Unit,
     onOpenSaved: (String) -> Unit,
     onUnsave: (String) -> Unit,
     onBrowse: () -> Unit,
@@ -212,6 +216,7 @@ private fun PlaylistsList(
                     PlaylistCard(
                         playlist = playlist,
                         onClick = { onOpenPlaylist(playlist.id) },
+                        onEdit = { onEditPlaylist(playlist) },
                         onDelete = { onDeletePlaylist(playlist.id) },
                     )
                 }
@@ -307,6 +312,7 @@ private fun SavedPlaylistCard(
 private fun PlaylistCard(
     playlist: Playlist,
     onClick: () -> Unit,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -360,6 +366,13 @@ private fun PlaylistCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
             )
+            IconButton(onClick = onEdit) {
+                Icon(
+                    imageVector = Icons.Filled.Edit,
+                    contentDescription = stringResource(R.string.playlist_edit),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             IconButton(onClick = onDelete) {
                 Icon(
                     imageVector = Icons.Filled.Delete,
@@ -374,9 +387,10 @@ private fun PlaylistCard(
 @Composable
 private fun PlaylistDetail(
     playlist: Playlist,
-    selectedTrackId: String?,
+    currentSong: Song?,
     onBack: () -> Unit,
     onSelectTrack: (String) -> Unit,
+    onEnded: () -> Unit = {},
     onRemoveTrack: ((String) -> Unit)? = null,
     onAddSong: ((Song) -> Unit)? = null,
     onUnsave: (() -> Unit)? = null,
@@ -386,7 +400,7 @@ private fun PlaylistDetail(
     modifier: Modifier = Modifier,
 ) {
     val tracks = playlist.tracks
-    val selectedSong = selectedTrackId?.let { id -> tracks.find { it.id == id } }
+    val selectedSong = currentSong
 
     Column(modifier = modifier.fillMaxSize()) {
         Row(
@@ -435,12 +449,13 @@ private fun PlaylistDetail(
         }
 
         // El reproductor solo se instancia cuando el usuario entró en el detalle
-        // de una lista Y hay un vídeo válido seleccionado (selectedTrackId resuelto).
+        // de una lista Y hay un vídeo válido seleccionado (currentSong resuelto).
         if (selectedSong != null && selectedSong.youtubeId.isNotBlank()) {
             YouTubePlayerView(
-                videoId = selectedSong.youtubeId,
+                currentSong = selectedSong,
                 onAddSong = { onAddSong?.invoke(selectedSong) },
                 showAddSong = !isSaved,
+                onEnded = onEnded,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(220.dp)

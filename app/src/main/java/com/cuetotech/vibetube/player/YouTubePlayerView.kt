@@ -47,31 +47,74 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.cuetotech.vibetube.BuildConfig
 import com.cuetotech.vibetube.R
+import com.cuetotech.vibetube.data.Song
 
-private const val TAG = "VibeTube"
+private const val TAG = "VibeTubePlayer"
 private const val JS_BRIDGE_NAME = "VibeTubeBridge"
 
-// El origen/base del documento debe ser un dominio PROPIO (distinto de youtube.com).
-// Si la página del reproductor y el iframe del embed comparten el mismo origen,
-// YouTube lo rechaza con error 153/152 por configuración inválida.
-private val PLAYER_ORIGIN: String = "https://${BuildConfig.APPLICATION_ID}"
+// Estado YT.PlayerState.ENDED de la API de YouTube (0): el vídeo terminó.
+const val YT_PLAYER_STATE_ENDED = 0
+
+// Origen/base del documento: dominio oficial de incrustación de YouTube sin
+// cookies (youtube-nocookie.com). El iframe del embed se comunica con la página
+// padre vía postMessage usando 'origin' como origen objetivo; al coincidir la
+// Base URL y 'origin', onStateChange/onVideoEnded llegan al puente sin ser
+// bloqueados. Usar "https://www.youtube.com" como base dispara el error 152-4
+// (suplantación), y un dominio propio inválido hacía que el embed cayera al
+// fallback de youtube.com, bloqueando los mensajes iframe->padre.
+private val PLAYER_ORIGIN: String = "https://www.youtube-nocookie.com"
 private const val GENERIC_ERROR = -1
 
 private class PlayerRef {
     var container: ViewGroup? = null
     var view: WebView? = null
+    var loadedVideoId: String? = null
+
+    // Bandera de control en Kotlin: evita procesar onVideoEnded más de una vez
+    // por canción aunque el puente JS repita el evento (defensa extra junto a
+    // la deduplicación hasEnded del JavaScript).
+    var endedHandled: Boolean = false
 }
 
 private class JsBridge(
     private val onPlayerError: (Int) -> Unit,
+    private val onPlayerStateChange: (Int) -> Unit,
+    private val onVideoEnded: () -> Unit,
+    private val onPlayerReady: () -> Unit,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
     fun onPlayerError(errorCode: Int) {
-        mainHandler.post { onPlayerError(errorCode) }
+        mainHandler.post {
+            Log.d(TAG, "onPlayerError: code=$errorCode")
+            onPlayerError(errorCode)
+        }
+    }
+
+    @JavascriptInterface
+    fun onPlayerStateChange(stateCode: Int) {
+        mainHandler.post {
+            Log.d(TAG, "onPlayerStateChange: state=$stateCode")
+            onPlayerStateChange(stateCode)
+        }
+    }
+
+    @JavascriptInterface
+    fun onVideoEnded() {
+        mainHandler.post {
+            Log.d(TAG, "onVideoEnded: el vídeo terminó, avanzando a la siguiente canción")
+            onVideoEnded()
+        }
+    }
+
+    @JavascriptInterface
+    fun onPlayerReady() {
+        mainHandler.post {
+            Log.d(TAG, "onPlayerReady: reproductor JS listo")
+            onPlayerReady()
+        }
     }
 }
 
@@ -101,30 +144,112 @@ private fun buildPlayerHtml(videoId: String): String {
               return -1;
             }
 
+            var bridge = function() { return window.$JS_BRIDGE_NAME; };
+            var player = null;
+            var hasEnded = false;
+            var pendingJsVideoId = null;
+
+            // Notifica el final de vídeo (ENDED, state=0) una sola vez por
+            // reproducción: la bandera hasEnded evita que el evento llegue en
+            // ráfagas al puente Android/JavaScript y sature la cola de llamadas.
+            function handleState(code) {
+              if (bridge()) {
+                bridge().onPlayerStateChange(code);
+              }
+              if (code === 0) {
+                if (!hasEnded) {
+                  hasEnded = true;
+                  if (bridge()) {
+                    bridge().onVideoEnded();
+                  }
+                }
+              } else if (code === 1 || code === 3) {
+                // PLAYING (1) / BUFFERING (3): el vídeo sigue en curso, se
+                // vuelve a permitir reportar el final de la reproducción.
+                hasEnded = false;
+              }
+            }
+
+            // Cambia de pista SIN recrear el WebView ni recargar el HTML: se usa
+            // cuando el ViewModel avanza a la siguiente canción (autoplay). Si el
+            // reproductor aún no se ha creado, el vídeo queda pendiente y se
+            // carga en cuanto onYouTubeIframeAPIReady cree el player.
+            function loadVideo(videoId) {
+              // Cambio de vídeo: se reinicia la bandera para que el final de la
+              // nueva reproducción se pueda reportar de nuevo.
+              hasEnded = false;
+              if (player) {
+                try {
+                  player.loadVideoById(videoId);
+                  // Fuerza la reproducción aunque el WebView bloquee el autoplay
+                  // por gestos de usuario.
+                  player.playVideo();
+                } catch (e) {}
+              } else {
+                pendingJsVideoId = videoId;
+              }
+            }
+
             var tag = document.createElement('script');
             tag.src = 'https://www.youtube.com/iframe_api';
             var first = document.getElementsByTagName('script')[0];
             first.parentNode.insertBefore(tag, first);
 
             function onYouTubeIframeAPIReady() {
-              new YT.Player('player', {
+              player = new YT.Player('player', {
                 videoId: '$safeId',
+                // Sirve el embed desde el mismo dominio que la página padre:
+                // www-widgetapi.js envía los eventos postMessage por defecto a
+                // www.youtube.com, que no coincide con la Base URL del WebView
+                // (youtube-nocookie.com) y bloquea onStateChange/onVideoEnded.
+                host: '$PLAYER_ORIGIN',
                 playerVars: {
                   autoplay: 1,
                   rel: 0,
                   playsinline: 1,
-                  origin: '$PLAYER_ORIGIN'
+                  enablejsapi: 1,
+                  origin: '$PLAYER_ORIGIN',
+                  widget_referrer: '$PLAYER_ORIGIN'
                 },
                 events: {
+                  onReady: function() {
+                    if (bridge()) {
+                      bridge().onPlayerReady();
+                    }
+                    // Fuerza el inicio de la reproducción: el WebView puede
+                    // bloquear el autoplay por gestos aunque playerVars tenga
+                    // autoplay: 1, así que se llama playVideo() explícitamente.
+                    try {
+                      player.playVideo();
+                    } catch (e) {}
+                  },
                   // Cualquier error (100/101/150/152/152-4/153...) activa el
                   // overlay de error directamente, sin reintentar en bucle.
                   onError: function(event) {
-                    if (window.$JS_BRIDGE_NAME) {
-                      window.$JS_BRIDGE_NAME.onPlayerError(extractErrorCode(event.data));
+                    if (bridge()) {
+                      bridge().onPlayerError(extractErrorCode(event.data));
                     }
+                  },
+                  // Cambio de estado del reproductor: 0=ended, 1=playing,
+                  // 2=paused, 3=buffering, 5=cued. El estado 0 permite pasar
+                  // automáticamente a la siguiente canción (autoplay).
+                  onStateChange: function(event) {
+                    handleState(event.data);
                   }
                 }
               });
+
+              // Si se pidió cambiar de vídeo antes de que el player existiera
+              // (autoplay muy temprano), se aplica ahora sobre el reproductor
+              // ya creado.
+              if (pendingJsVideoId) {
+                var pendingId = pendingJsVideoId;
+                pendingJsVideoId = null;
+                try {
+                  player.loadVideoById(pendingId);
+                  player.playVideo();
+                } catch (e) {}
+              }
             }
           </script>
         </body>
@@ -134,14 +259,107 @@ private fun buildPlayerHtml(videoId: String): String {
 
 @Composable
 fun YouTubePlayerView(
-    videoId: String,
+    currentSong: Song?,
     onAddSong: () -> Unit,
     showAddSong: Boolean = true,
+    onEnded: () -> Unit = {},
+    onStateChange: ((Int) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val playerRef = remember { PlayerRef() }
-    var playerError by remember(videoId) { mutableStateOf<Int?>(null) }
+    var playerReady by remember { mutableStateOf(false) }
+    var playerError by remember { mutableStateOf<Int?>(null) }
+    val videoId = currentSong?.youtubeId.orEmpty()
+
+    // Crea el WebView con el reproductor embebido (el vídeo inicial se carga
+    // con autoplay). Se invoca UNA sola vez; nunca se recrea al cambiar de
+    // canción para no reiniciar la reproducción.
+    val setupPlayer: (String) -> Unit = { newVideoId ->
+        val container = playerRef.container
+        if (container != null) {
+            runCatching {
+                // Permite inspeccionar el WebView desde Chrome DevTools
+                // (chrome://inspect) en builds de depuración.
+                WebView.setWebContentsDebuggingEnabled(true)
+                val webView = WebView(container.context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    settings.loadWithOverviewMode = true
+                    settings.useWideViewPort = true
+                    settings.cacheMode = WebSettings.LOAD_NO_CACHE
+                    settings.userAgentString = buildPlayerUserAgent(container.context)
+                    addJavascriptInterface(
+                        JsBridge(
+                            onPlayerError = { code -> playerError = code },
+                            onPlayerStateChange = { state ->
+                                Log.d(TAG, "Estado del reproductor: $state (videoId=$newVideoId)")
+                                // PLAYING (1) / BUFFERING (3): la reproducción
+                                // sigue en curso, se vuelve a permitir avanzar
+                                // al terminar esta canción.
+                                if (state == 1 || state == 3) {
+                                    playerRef.endedHandled = false
+                                }
+                                onStateChange?.invoke(state)
+                            },
+                            onVideoEnded = {
+                                // Un solo avance por canción: la primera vez que
+                                // llega ENDED se avanza y se marca como manejado;
+                                // cualquier repetición del evento se ignora.
+                                if (!playerRef.endedHandled) {
+                                    playerRef.endedHandled = true
+                                    onEnded()
+                                }
+                            },
+                            onPlayerReady = {
+                                playerReady = true
+                                Log.d(TAG, "onPlayerReady (videoId=$newVideoId)")
+                            },
+                        ),
+                        JS_BRIDGE_NAME,
+                    )
+                    webViewClient = object : WebViewClient() {
+                        override fun onReceivedError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            error: WebResourceError,
+                        ) {
+                            super.onReceivedError(view, request, error)
+                            if (request.isForMainFrame && playerError == null) {
+                                view.post { playerError = GENERIC_ERROR }
+                            }
+                        }
+                    }
+                    webChromeClient = WebChromeClient()
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                }
+                container.addView(
+                    webView,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                playerRef.view = webView
+                playerRef.loadedVideoId = newVideoId
+                Log.d(TAG, "Cargando reproductor con ID: $newVideoId")
+                webView.clearCache(true)
+                webView.clearHistory()
+                webView.loadDataWithBaseURL(
+                    PLAYER_ORIGIN,
+                    buildPlayerHtml(newVideoId),
+                    "text/html",
+                    "utf-8",
+                    null,
+                )
+            }.onFailure { exception ->
+                Log.e(TAG, "No se pudo inicializar el WebView", exception)
+            }
+        } else {
+            Log.w(TAG, "setupPlayer: contenedor no disponible")
+        }
+    }
 
     Box(modifier = modifier) {
         AndroidView(
@@ -188,72 +406,87 @@ fun YouTubePlayerView(
         }
     }
 
-    DisposableEffect(videoId) {
-        val container = playerRef.container
-        if (videoId.isNotBlank() && container != null) {
-            runCatching {
-                val webView = WebView(container.context).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.mediaPlaybackRequiresUserGesture = false
-                    settings.loadWithOverviewMode = true
-                    settings.useWideViewPort = true
-                    settings.cacheMode = WebSettings.LOAD_NO_CACHE
-                    settings.userAgentString = buildPlayerUserAgent(container.context)
-                    addJavascriptInterface(
-                        JsBridge { code -> playerError = code },
-                        JS_BRIDGE_NAME,
-                    )
-                    webViewClient = object : WebViewClient() {
-                        override fun onReceivedError(
-                            view: WebView,
-                            request: WebResourceRequest,
-                            error: WebResourceError,
-                        ) {
-                            super.onReceivedError(view, request, error)
-                            if (request.isForMainFrame && playerError == null) {
-                                view.post { playerError = GENERIC_ERROR }
-                            }
-                        }
-                    }
-                    webChromeClient = WebChromeClient()
-                    setBackgroundColor(android.graphics.Color.BLACK)
-                }
-                container.addView(
-                    webView,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                    ),
-                )
-                playerRef.view = webView
-                Log.d(TAG, "Cargando reproductor con ID: $videoId")
-                webView.clearCache(true)
-                webView.clearHistory()
-                webView.loadDataWithBaseURL(
-                    PLAYER_ORIGIN,
-                    buildPlayerHtml(videoId),
-                    "text/html",
-                    "utf-8",
-                    null,
-                )
-            }.onFailure { exception ->
-                Log.e(TAG, "No se pudo inicializar el WebView", exception)
-            }
+    // El WebView se crea UNA sola vez y se reutiliza: al cambiar de canción se
+    // carga el nuevo vídeo con player.loadVideoById(videoId) (autoplay), en vez
+    // de recrear el WebView entero (más frágil y más lento).
+    DisposableEffect(Unit) {
+        if (videoId.isNotBlank() && playerRef.container != null) {
+            setupPlayer(videoId)
         }
         onDispose {
             Log.d(TAG, "Liberando reproductor con ID: $videoId")
-            runCatching {
-                playerRef.view?.let { webView ->
-                    webView.stopLoading()
-                    webView.loadUrl("about:blank")
-                    if (webView.parent != null) {
-                        (webView.parent as? ViewGroup)?.removeView(webView)
-                    }
-                    webView.destroy()
+            disposePlayer(playerRef)
+            playerReady = false
+        }
+    }
+
+    // Observa directamente el ID de la canción actual (currentSong). Cuando el
+    // ViewModel avanza de pista (playNextTrack/playNextSavedTrack), el ID cambia
+    // y este efecto carga el nuevo vídeo vía player.loadVideoById(videoId), SIN
+    // recrear el WebView ni recargar el HTML. Si el reproductor JS aún no está
+    // listo, loadVideo() lo deja pendiente (pendingJsVideoId) y se aplica en
+    // cuanto el player se cree.
+    LaunchedEffect(videoId) {
+        if (videoId.isNotBlank() && playerRef.loadedVideoId != videoId) {
+            playerRef.loadedVideoId = videoId
+            playerRef.endedHandled = false
+            playerError = null
+            Log.d(TAG, "Video actual cambiado a: $videoId")
+            playerRef.view?.let { webView ->
+                if (playerReady) {
+                    loadVideoInPlayer(webView, videoId)
+                } else {
+                    queueVideoInPlayer(webView, videoId)
                 }
-                playerRef.view = null
             }
+        }
+    }
+}
+
+private fun disposePlayer(playerRef: PlayerRef) {
+    runCatching {
+        playerRef.view?.let { webView ->
+            webView.stopLoading()
+            webView.loadUrl("about:blank")
+            if (webView.parent != null) {
+                (webView.parent as? ViewGroup)?.removeView(webView)
+            }
+            webView.destroy()
+        }
+    }
+    playerRef.view = null
+    playerRef.loadedVideoId = null
+}
+
+// Carga el vídeo directamente sobre el reproductor YA existente, sin recrear el
+// WebView: ejecuta SOLO JavaScript (player.loadVideoById) sobre el player listo,
+// con una comprobación defensiva por si el objeto player aún no está expuesto.
+private fun loadVideoInPlayer(webView: WebView, videoId: String) {
+    val safeId = videoId.replace("'", "\\'")
+    webView.post {
+        runCatching {
+            Log.d(TAG, "loadVideoInPlayer (player.loadVideoById + playVideo): $videoId")
+            webView.evaluateJavascript(
+                "if (window.player && typeof player.loadVideoById === 'function') { player.loadVideoById('$safeId'); player.playVideo(); }",
+                null,
+            )
+        }.onFailure { exception ->
+            Log.e(TAG, "No se pudo cargar el vídeo $videoId", exception)
+        }
+    }
+}
+
+// Encola el vídeo cuando el reproductor JS aún no está listo: loadVideo()
+// guarda el id en pendingJsVideoId y se aplica en cuanto onYouTubeIframeAPIReady
+// cree el player (sin recrear el WebView).
+private fun queueVideoInPlayer(webView: WebView, videoId: String) {
+    val safeId = videoId.replace("'", "\\'")
+    webView.post {
+        runCatching {
+            Log.d(TAG, "queueVideoInPlayer (loadVideo pendiente): $videoId")
+            webView.evaluateJavascript("loadVideo('$safeId');", null)
+        }.onFailure { exception ->
+            Log.e(TAG, "No se pudo encolar el vídeo $videoId", exception)
         }
     }
 }

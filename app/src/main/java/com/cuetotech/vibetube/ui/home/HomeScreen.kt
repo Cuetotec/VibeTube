@@ -147,6 +147,28 @@ fun HomeScreen(
             modifier = modifier,
         )
     }
+
+    // Overlay bloqueante mientras se sube una imagen: impide que el usuario
+    // navegue fuera antes de que la subida termine (el Uri local de la galería
+    // solo es válido durante la sesión actual).
+    if (isUploadingAvatar || isUploadingBanner) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.6f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.padding(top = 12.dp))
+                Text(
+                    text = stringResource(R.string.profile_uploading),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+    }
 }
 
 private enum class ImageTarget { Avatar, Banner }

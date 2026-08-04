@@ -26,6 +26,7 @@
     <string name="profile_banner_change">Cambiar portada</string>
     <string name="profile_avatar_change">Cambiar avatar</string>
     <string name="profile_image_upload_error">No se pudo subir la imagen. Inténtalo de nuevo.</string>
+    <string name="profile_uploading">Subiendo imagen…</string>
     <string name="profile_add_by_url">Por enlace</string>
 
     <!-- Búsqueda de YouTube -->

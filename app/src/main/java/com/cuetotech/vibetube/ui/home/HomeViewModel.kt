@@ -1,10 +1,11 @@
 package com.cuetotech.vibetube.ui.home
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.net.Uri
 import com.cuetotech.vibetube.data.AuthRepository
-import com.cuetotech.vibetube.data.ProfileStorageRepository
+import com.cuetotech.vibetube.data.ProfileMediaRepository
 import com.cuetotech.vibetube.data.Song
 import com.cuetotech.vibetube.data.UserProfile
 import com.cuetotech.vibetube.data.UserProfileRepository
@@ -39,11 +40,12 @@ data class SearchUiState(
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class HomeViewModel(
+    application: Application,
     private val authRepository: AuthRepository = AuthRepository(),
     private val profileRepository: UserProfileRepository = UserProfileRepository(),
     private val searchRepository: YouTubeSearchRepository = YouTubeSearchRepository(),
-    private val storageRepository: ProfileStorageRepository = ProfileStorageRepository(),
-) : ViewModel() {
+    private val mediaRepository: ProfileMediaRepository = ProfileMediaRepository(application),
+) : AndroidViewModel(application) {
 
     private val _profileState = MutableStateFlow<ProfileUiState>(ProfileUiState.Loading)
     val profileState: StateFlow<ProfileUiState> = _profileState.asStateFlow()
@@ -89,55 +91,62 @@ class HomeViewModel(
         authRepository.signOut()
     }
 
-    // Sube una nueva foto de avatar a Firebase Storage, guarda la URL en el
-    // perfil (avatarUrl + photoUrl para que se propague a amigos/perfiles
-    // públicos) y actualiza el estado local.
+    // Copia la nueva foto de avatar desde la galería local a la carpeta privada
+    // de la app (filesDir, "avatar_{uid}.jpg"), guarda su ruta "file:///..." en
+    // el perfil (avatarUrl + photoUrl para que se propague a amigos/perfiles
+    // públicos) y actualiza el estado local. Sin Firebase Storage.
     fun uploadAvatar(uri: Uri) {
         val uid = authRepository.currentUser()?.uid ?: return
         viewModelScope.launch {
             _isUploadingAvatar.value = true
             _uploadError.value = null
             runCatching {
-                val url = storageRepository.uploadAvatar(uid, uri)
+                val path = mediaRepository.copyImageToPrivateStorage(uri, "avatar_$uid.jpg")
                 val current = (profileState.value as? ProfileUiState.Success)?.profile
                     ?: UserProfile(
                         uid = uid,
                         displayName = "Usuario",
                         email = authRepository.currentUser()?.email.orEmpty(),
                     )
-                val updated = current.copy(avatarUrl = url, photoUrl = url)
+                val previous = current.avatarUrl
+                val updated = current.copy(avatarUrl = path, photoUrl = path)
                 profileRepository.saveUserProfile(updated)
+                mediaRepository.deleteLocalImage(previous)
                 updated
             }.onSuccess { updated ->
                 _profileState.value = ProfileUiState.Success(updated)
             }.onFailure { exception ->
-                _uploadError.value = exception.message ?: "No se pudo subir la imagen"
+                _uploadError.value = exception.message ?: "No se pudo guardar la imagen"
             }
             _isUploadingAvatar.value = false
         }
     }
 
-    // Sube una nueva imagen de portada (banner) y guarda su URL en el perfil.
+    // Copia la nueva imagen de fondo (portada) desde la galería local a la
+    // carpeta privada de la app (filesDir, "banner_{uid}.jpg") y guarda su ruta
+    // "file:///..." en el perfil. Sin Firebase Storage.
     fun uploadBanner(uri: Uri) {
         val uid = authRepository.currentUser()?.uid ?: return
         viewModelScope.launch {
             _isUploadingBanner.value = true
             _uploadError.value = null
             runCatching {
-                val url = storageRepository.uploadBanner(uid, uri)
+                val path = mediaRepository.copyImageToPrivateStorage(uri, "banner_$uid.jpg")
                 val current = (profileState.value as? ProfileUiState.Success)?.profile
                     ?: UserProfile(
                         uid = uid,
                         displayName = "Usuario",
                         email = authRepository.currentUser()?.email.orEmpty(),
                     )
-                val updated = current.copy(bannerUrl = url)
+                val previous = current.bannerUrl
+                val updated = current.copy(bannerUrl = path)
                 profileRepository.saveUserProfile(updated)
+                mediaRepository.deleteLocalImage(previous)
                 updated
             }.onSuccess { updated ->
                 _profileState.value = ProfileUiState.Success(updated)
             }.onFailure { exception ->
-                _uploadError.value = exception.message ?: "No se pudo subir la imagen"
+                _uploadError.value = exception.message ?: "No se pudo guardar la imagen"
             }
             _isUploadingBanner.value = false
         }

@@ -252,6 +252,41 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **Iconos legacy (API < 26)**: regenerados `ic_launcher.webp`/`ic_launcher_round.webp` en las 5 densidades con el mismo logo (cuadrado redondeado ~80% y círculo ~94% de ancho), para que en ningún sitio quede la figura del androide.
 - Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos). Render verificado por píxeles (ondas y play en rojo sobre negro).
 
+### Iteración 15 — Fix subida de foto de perfil: orden estricto subida → URL (04-08-2026)
+- **Síntoma**: al actualizar el avatar/portada desde la galería la app lanzaba **"Object does not exist at desired location"** — se consultaba Firebase Storage antes de que el objeto subido existiera.
+- **`ProfileStorageRepository`**: la subida y la URL de descarga ahora están **encadenadas explícitamente**: `reference.putFile(localUri).continueWithTask { task -> if (!task.isSuccessful) throw ... ; reference.downloadUrl }`. La URL solo se obtiene como continuación de la tarea de subida ya completada (`.await()` sobre el `Task<Uri>` final); si `putFile` falla, la excepción se propaga y **nunca** se consulta `downloadUrl`. El Uri local (`content://...`) recibido de la galería se pasa tal cual a `putFile`; la ruta destino sigue siendo `profileImages/{uid}/avatar.jpg` / `banner.jpg` (coherente con las reglas de Storage ya configuradas).
+- **Bloqueo de navegación durante la subida** (`HomeScreen`): mientras `isUploadingAvatar || isUploadingBanner`, se muestra un **overlay a pantalla completa** (fondo semitransparente + `CircularProgressIndicator` + texto "Subiendo imagen…", nuevo string `profile_uploading`) que impide al usuario navegar fuera antes de que termine la subida (el permiso del Uri local de la galería solo es válido en la sesión actual).
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
+
+### Iteración 16 — Unificación de la subida de imágenes de perfil (avatar y fondo) (04-08-2026)
+- El error **"Object does not exist at desired location"** seguía apareciendo tanto al cambiar el avatar como al seleccionar una imagen de fondo local, así que la lógica de subida se unifica en una única función genérica del repositorio.
+- **`ProfileStorageRepository.uploadImageToStorage(localUri: Uri, storagePath: String): String`** (nuevo, único punto de subida):
+  1. `storageRef.putFile(localUri).await()` — sube PRIMERO el archivo local (`content://...`) y espera a que termine.
+  2. `return storageRef.downloadUrl.await().toString()` — obtiene la URL de descarga SOLO cuando la subida ha terminado (si `putFile` falla, `await` lanza la excepción y nunca se consulta `downloadUrl`).
+- **Rutas de Storage por usuario (carpetas del propio perfil, a la altura del bucket)**:
+  - Avatar → `avatars/{uid}.jpg`.
+  - Fondo/portada → `backgrounds/{uid}.jpg`.
+  - Wrappers `uploadAvatar(uid, uri)` y `uploadBanner(uid, uri)` que delegan en la función genérica con esas rutas.
+- **Persistencia en Firestore**:
+  - Avatar → URL guardada en `avatarUrl` y **`photoUrl`** (este último se propaga a amigos/perfiles públicos).
+  - Fondo → URL guardada en `bannerUrl` (el campo correspondiente del perfil).
+- **Gestión de estados en la UI** (ya existente desde la Iteración 15): `isUploadingAvatar`/`isUploadingBanner` muestran un **overlay bloqueante a pantalla completa** ("Subiendo imagen…") + spinner en el elemento concreto; los elementos de avatar/fondo quedan no pulsables mientras se sube, evitando re-taps y que se muestre una imagen previa errónea.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
+- **Nota para las reglas de Storage**: ahora las imágenes viven en `avatars/{uid}.jpg` y `backgrounds/{uid}.jpg` (no en `profileImages/{uid}/...`). Las reglas de seguridad deben cubrir esas rutas nuevas, p. ej.: `match /avatars/{uid}.jpg { allow read: if request.auth != null; allow write: if request.auth.uid == uid }` (idéntico para `/backgrounds/`).
+
+### Iteración 17 — Sin Firebase Storage: imágenes de perfil en almacenamiento interno (04-08-2026)
+- **Decisión**: se abandona Firebase Storage por completo. Avatar y fondo se guardan **localmente en la memoria interna del dispositivo** (Internal Storage, `context.filesDir`). Se eliminan todas las llamadas y dependencias hacia `Firebase.storage` para evitar errores de red.
+- **`ProfileMediaRepository` (nuevo, sustituye a `ProfileStorageRepository`)**, con `Context`:
+  - `copyImageToPrivateStorage(source: Uri, fileName: String): String` — copia la imagen seleccionada de la galería (`content://...`) a `filesDir` (en `Dispatchers.IO`) y devuelve la **ruta local `file:///...`**. Si no se puede abrir el origen, lanza `IOException`.
+  - `deleteLocalImage(fileUrl)` — borra la imagen local previa si está dentro de `filesDir`, evitando archivos huérfanos al reemplazar avatar/fondo.
+- **`HomeViewModel`** pasa a ser `AndroidViewModel(application)` (para obtener `filesDir` sin DI manual); el default `viewModel()` sigue funcionando.
+  - `uploadAvatar(uri)` → copia a `filesDir/avatar_{uid}.jpg`; guarda la ruta en **`avatarUrl` + `photoUrl`**.
+  - `uploadBanner(uri)` → copia a `filesDir/banner_{uid}.jpg`; guarda la ruta en **`bannerUrl`**.
+  - La ruta local se persiste en Firestore (campo del perfil) y se usa para cargar la imagen en la UI (Coil soporta `file:///...` en `AsyncImage`).
+- **Dependencias**: eliminados `implementation(libs.firebase.storage)` de `app/build.gradle.kts` y el acceso `firebase-storage` de `gradle/libs.versions.toml`. Se conservan `firebase-auth` y `firebase-firestore`. Sin cambios en `HomeScreen` (Coil ya carga rutas `file:///`).
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
+- **Nota**: al ser almacenamiento local, avatar/fondo solo se ven en el mismo dispositivo; `photoUrl` con `file:///...` no se renderiza en otros dispositivos (amigos/perfiles públicos). Las imágenes previas subidas a Storage siguen visibles en los perfiles que las referencian.
+
 ## Pendiente / ideas
 - ~~Reproducción automática de la siguiente canción al terminar.~~ **Hecho y validado** (Iteración 6): `onVideoEnded` → `playNextTrack`/`playNextSavedTrack` → `loadVideoById` → siguiente canción, sin flood y sin saturar el main thread.
 - ~~Editar listas (título/descripción, toggle público).~~ **Hecho**.

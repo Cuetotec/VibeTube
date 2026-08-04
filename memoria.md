@@ -219,6 +219,18 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **Strings**: nuevos `profile_banner_change`, `profile_avatar_change` y `profile_image_upload_error`.
 - Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
 
+### Iteración 10 — Confirmación antes de eliminar un vídeo de la lista (04-08-2026)
+- **Estado local** (`PlaylistDetail`): nuevo `videoToDelete` (`remember { mutableStateOf<String?>(null) }`) que guarda el ID de la canción pendiente de confirmar. Al pulsar el icono de eliminar de una canción ya **no se borra directamente**: solo se guarda el ID en `videoToDelete`.
+- **Diálogo de confirmación**: cuando `videoToDelete != null` se muestra un `AlertDialog` con título "¿Eliminar vídeo?", mensaje "¿Estás seguro de que quieres eliminar este vídeo de la lista?", botón **Eliminar** (texto en `MaterialTheme.colorScheme.error`, estilo destructivo) que ejecuta `onRemoveTrack(videoToDelete)` y resetea el estado a null, y botón **Cancelar** que solo cierra el diálogo reseteando el estado. `onDismissRequest` (toque fuera / Back) también resetea a null.
+- **Strings**: nuevos `playlist_delete_track_title`, `playlist_delete_track_message` y `playlist_delete_track_confirm`; reutiliza `common_cancel`.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
+
+### Iteración 11 — Confirmación antes de eliminar una lista completa (04-08-2026)
+- **Estado local** (`PlaylistsScreen`, nivel raíz): nuevo `playlistToDelete` (`remember { mutableStateOf<Playlist?>(null) }`). Al pulsar el icono de eliminar de una lista ya **no se borra directamente**: solo se guarda la lista (buscándola por su id en `uiState.playlists`) en `playlistToDelete`.
+- **Diálogo de confirmación**: cuando `playlistToDelete != null` se muestra un `AlertDialog` con título "¿Eliminar lista?", mensaje "¿Estás seguro de que quieres eliminar esta lista? Esta acción no se puede deshacer.", botón **Eliminar** (texto en `MaterialTheme.colorScheme.error`) que ejecuta `viewModel.deletePlaylist(id)` y cierra el diálogo reseteando el estado, y botón **Cancelar** que solo lo cierra. `onDismissRequest` (toque fuera / Back) también resetea a null.
+- **Strings**: nuevos `playlist_delete_confirm_title`, `playlist_delete_confirm_message` y `playlist_delete_confirm_action`; reutiliza `common_cancel`.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
+
 ## Pendiente / ideas
 - ~~Reproducción automática de la siguiente canción al terminar.~~ **Hecho y validado** (Iteración 6): `onVideoEnded` → `playNextTrack`/`playNextSavedTrack` → `loadVideoById` → siguiente canción, sin flood y sin saturar el main thread.
 - ~~Editar listas (título/descripción, toggle público).~~ **Hecho**.
@@ -226,4 +238,4 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - ~~Botón "Por enlace" con varios enlaces a la vez.~~ **Hecho** (Iteración 8): diálogo multilínea + selector de lista de destino + `extractVideoIds` + `addMultipleTracksByUrls` con escritura agrupada y Toast de confirmación.
 - ~~Subir imagen de avatar/banner/photo (Firebase Storage).~~ **Hecho** (Iteración 9): `ProfileStorageRepository` (carpeta `profileImages/{uid}`), `HomeViewModel.uploadAvatar`/`uploadBanner` y portada/avatar tocables con photo picker y progreso de subida. Pendiente: definir **reglas de seguridad de Storage** (acceso al propietario).
 - **Reglas de seguridad de Firestore**: revisar y endurecer las reglas (búsqueda de `users`, `friend_requests`, subcolecciones `friends`/`savedCollections`) antes de publicar.
-- **Reglas de seguridad de Firebase Storage**: limitar `profileImages/{uid}/...` a su propietario (auth.uid == uid).
+- ~~Reglas de seguridad de Firebase Storage.~~ **Hecho**: limitar `profileImages/{uid}/...` a su propietario (auth.uid == uid).

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -40,6 +41,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -73,6 +77,10 @@ fun PlaylistsScreen(
 
     val selectedPlaylist = uiState.playlists.find { it.id == selectedPlaylistId }
     val selectedSaved = savedPlaylists.find { it.playlist.id == selectedSavedId }
+
+    // Lista pendiente de confirmar antes de borrarla. Mientras sea distinta de
+    // null se muestra el diálogo de confirmación de borrado.
+    var playlistToDelete by remember { mutableStateOf<Playlist?>(null) }
 
     BackHandler(enabled = selectedPlaylist != null || selectedSaved != null) {
         when {
@@ -152,13 +160,39 @@ fun PlaylistsScreen(
             savedPlaylists = savedPlaylists,
             onCreatePlaylist = viewModel::openCreateDialog,
             onOpenPlaylist = viewModel::openPlaylist,
-            onDeletePlaylist = viewModel::deletePlaylist,
+            onDeletePlaylist = { id -> playlistToDelete = uiState.playlists.find { it.id == id } },
             onEditPlaylist = viewModel::openEditDialog,
             onOpenSaved = viewModel::openSavedPlaylist,
             onUnsave = viewModel::unsavePlaylist,
             onBrowse = onBrowse,
             onGoToFriends = onGoToFriends,
             modifier = modifier,
+        )
+    }
+
+    playlistToDelete?.let { playlist ->
+        AlertDialog(
+            onDismissRequest = { playlistToDelete = null },
+            title = { Text(stringResource(R.string.playlist_delete_confirm_title)) },
+            text = { Text(stringResource(R.string.playlist_delete_confirm_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deletePlaylist(playlist.id)
+                        playlistToDelete = null
+                    },
+                ) {
+                    Text(
+                        text = stringResource(R.string.playlist_delete_confirm_action),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { playlistToDelete = null }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
         )
     }
 }
@@ -429,6 +463,10 @@ private fun PlaylistDetail(
     val selectedSong = currentSong
     val hasValidSong = selectedSong != null && selectedSong.youtubeId.isNotBlank()
 
+    // ID de la canción pendiente de confirmar antes de borrarla. Mientras sea
+    // distinto de null se muestra el diálogo de confirmación de borrado.
+    var videoToDelete by remember { mutableStateOf<String?>(null) }
+
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
         Row(
@@ -527,7 +565,7 @@ private fun PlaylistDetail(
                         onClick = { onSelectTrack(track.id) },
                         trailingContent = {
                             if (onRemoveTrack != null) {
-                                IconButton(onClick = { onRemoveTrack(track.id) }) {
+                                IconButton(onClick = { videoToDelete = track.id }) {
                                     Icon(
                                         imageVector = Icons.Filled.Delete,
                                         contentDescription = stringResource(R.string.playlist_remove_track),
@@ -569,6 +607,32 @@ private fun PlaylistDetail(
                 )
             }
         }
+    }
+
+    videoToDelete?.let { songId ->
+        AlertDialog(
+            onDismissRequest = { videoToDelete = null },
+            title = { Text(stringResource(R.string.playlist_delete_track_title)) },
+            text = { Text(stringResource(R.string.playlist_delete_track_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRemoveTrack?.invoke(songId)
+                        videoToDelete = null
+                    },
+                ) {
+                    Text(
+                        text = stringResource(R.string.playlist_delete_track_confirm),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { videoToDelete = null }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
+        )
     }
 }
 

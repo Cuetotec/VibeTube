@@ -57,8 +57,14 @@
     <string name="playlist_no_tracks_title">Esta lista no tiene vídeos añadidos</string>
     <string name="playlist_no_tracks_subtitle">Busca en Inicio y añádelas con el botón «+»</string>
     <string name="playlist_delete">Eliminar lista</string>
+    <string name="playlist_delete_confirm_title">¿Eliminar lista?</string>
+    <string name="playlist_delete_confirm_message">¿Estás seguro de que quieres eliminar esta lista? Esta acción no se puede deshacer.</string>
+    <string name="playlist_delete_confirm_action">Eliminar</string>
     <string name="playlist_edit">Editar lista</string>
     <string name="playlist_remove_track">Quitar canción de la lista</string>
+    <string name="playlist_delete_track_title">¿Eliminar vídeo?</string>
+    <string name="playlist_delete_track_message">¿Estás seguro de que quieres eliminar este vídeo de la lista?</string>
+    <string name="playlist_delete_track_confirm">Eliminar</string>
     <string name="playlist_back">Volver a mis colecciones</string>
     <string name="playlist_play">Reproducir lista</string>
     <string name="playlist_unsave">Quitar de Mis Colecciones</string>

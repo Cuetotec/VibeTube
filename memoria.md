@@ -12,6 +12,7 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 
 ### Dependencias
 - `firebase-firestore`, `firebase-auth` (gestionadas por `firebase-bom` 34.16.0).
+- `core-splashscreen` 1.2.0 (`androidx.core:core-splashscreen`) para la Splash Screen con retrocompatibilidad.
 - `coil-compose` (2.7.0) para imágenes remotas (miniaturas, avatar, banner).
 - `androidx-compose-material-icons-core` y `material-icons-extended`.
 - `kotlinx-coroutines-play-services` para `tasks.await()`.
@@ -230,6 +231,26 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **Diálogo de confirmación**: cuando `playlistToDelete != null` se muestra un `AlertDialog` con título "¿Eliminar lista?", mensaje "¿Estás seguro de que quieres eliminar esta lista? Esta acción no se puede deshacer.", botón **Eliminar** (texto en `MaterialTheme.colorScheme.error`) que ejecuta `viewModel.deletePlaylist(id)` y cierra el diálogo reseteando el estado, y botón **Cancelar** que solo lo cierra. `onDismissRequest` (toque fuera / Back) también resetea a null.
 - **Strings**: nuevos `playlist_delete_confirm_title`, `playlist_delete_confirm_message` y `playlist_delete_confirm_action`; reutiliza `common_cancel`.
 - Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
+
+### Iteración 12 — Infraestructura de Splash Screen personalizada (Android 12+ y retrocompatibilidad) (04-08-2026)
+- **Dependencia**: se añade `androidx.core:core-splashscreen` 1.2.0 en `gradle/libs.versions.toml` y `app/build.gradle.kts`.
+- **Tema `Theme.App.Starting`** en `res/values/themes.xml` y `res/values-night/themes.xml` (nuevo): hereda de `Theme.SplashScreen` y define `windowSplashScreenBackground` (`@color/vibe_background`, el mismo fondo del tema principal para una transición continua), `windowSplashScreenAnimatedIcon` (**icono temporal**: `@mipmap/ic_launcher`, el launcher por defecto, hasta tener el nuevo) y `postSplashScreenTheme` (`@style/Theme.VibeTube`). En modo noche usa el mismo fondo porque la app es oscura de forma fija.
+- **Manifest**: la `MainActivity` ahora usa `android:theme="@style/Theme.App.Starting"` como tema de arranque.
+- **`MainActivity.onCreate`**: se llama a `installSplashScreen()` (import de `androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen`) **antes de `super.onCreate()`**; en Android 12+ se apoya en la API del sistema y en versiones anteriores la emula con `Theme.SplashScreen`.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos). Por ahora la splash muestra el icono por defecto de Android.
+
+### Iteración 13 — Icono de la app y splash con estética oscura y roja (04-08-2026)
+- **Icono adaptativo (Android 12+)**: `res/drawable/ic_launcher_background.xml` ahora es un fondo **negro `#0F0F0F`** limpio (se eliminaron las líneas de rejilla del template) y `ic_launcher_foreground.xml` pinta el robot Android en **rojo primario `#FF0033`** (se conserva la sombra sutil del diseño original). `mipmap-anydpi-v26/ic_launcher.xml` e `ic_launcher_round.xml` siguen referenciando estos drawables; el `monochrome` reutiliza el foreground para los iconos temáticos de Android 13+.
+- **Iconos legacy (API < 26, minSdk 24)**: se regeneraron `ic_launcher.webp` y `ic_launcher_round.webp` en las 5 densidades (`mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}`) manteniendo la composición del template original — **cuadrado con esquinas redondeadas** (radio ~15%) y **círculo** respectivamente, con el robot rojo `#FF0033` sobre fondo negro `#0F0F0F` (robot a ~80% del ancho en el cuadrado y ~94% en el redondo, igual que el template). Generados vía SVG (`legacy_square.svg`/`legacy_round.svg`) → `rsvg-convert` → `magick` (webp).
+- **Splash Screen**: se mantiene la infraestructura de la Iteración 12 (`core-splashscreen` 1.2.0, `Theme.App.Starting` en `values/` y `values-night/`, `@style/Theme.App.Starting` en la `MainActivity`, `installSplashScreen()` en `onCreate`). El `windowSplashScreenAnimatedIcon` (`@mipmap/ic_launcher`) y el fondo (`@color/vibe_background` = `#0F0F0F`) ahora muestran la nueva iconografía oscura/roja de forma coherente.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
+
+### Iteración 14 — Logo personalizado de VibeTube (ondas de sonido + play), sin el androide (04-08-2026)
+- **`ic_launcher_foreground.xml`**: se **sustituye el robot de Android** por el logo minimalista de VibeTube en rojo `#FF0033`: **dos ondas de sonido** (arcos simétricos que parten del centro superior hacia los laterales) dibujadas como **trazos** (`strokeColor`/`strokeWidth=6`/`strokeLineCap=round`, no relleno, para que se vean como líneas) y un **botón de reproducción** (triángulo relleno) centrado bajo las ondas.
+- **Correcciones sobre el XML facilitado**: el namespace `xmlns:android="http://schemas.android.com/apk/apk/xml/android"` era inválido (no compilaba) → se usó el oficial `http://schemas.android.com/apk/res/android`; las ondas como contorno abierto relleno no se verían → se convirtieron a paths con trazo; los extremos originales (x=19 y x=89) salían de la zona segura de los iconos adaptativos (que se recorta a un círculo/máscara) → se trajeron a `x=27..81`.
+- **Iconos adaptativos**: `mipmap-anydpi-v26/ic_launcher.xml` e `ic_launcher_round.xml` siguen apuntando a `@drawable/ic_launcher_foreground` (también como `monochrome`), por lo que **todos usan el nuevo logo automáticamente**.
+- **Iconos legacy (API < 26)**: regenerados `ic_launcher.webp`/`ic_launcher_round.webp` en las 5 densidades con el mismo logo (cuadrado redondeado ~80% y círculo ~94% de ancho), para que en ningún sitio quede la figura del androide.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos). Render verificado por píxeles (ondas y play en rojo sobre negro).
 
 ## Pendiente / ideas
 - ~~Reproducción automática de la siguiente canción al terminar.~~ **Hecho y validado** (Iteración 6): `onVideoEnded` → `playNextTrack`/`playNextSavedTrack` → `loadVideoById` → siguiente canción, sin flood y sin saturar el main thread.

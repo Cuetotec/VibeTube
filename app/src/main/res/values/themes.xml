@@ -4,4 +4,16 @@
     <style name="Theme.VibeTube" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/vibe_background</item>
     </style>
+
+    <!-- Tema de la pantalla de inicio (Splash Screen). Se aplica a la
+         MainActivity antes de que cargue el contenido real. -->
+    <style name="Theme.App.Starting" parent="Theme.SplashScreen">
+        <!-- Fondo de la splash: mismo color que el tema principal para que la
+             transición sea continua. -->
+        <item name="windowSplashScreenBackground">@color/vibe_background</item>
+        <!-- Icono temporal: se usa el launcher por defecto hasta tener el nuevo. -->
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <!-- Tema que se aplica cuando la splash se cierra. -->
+        <item name="postSplashScreenTheme">@style/Theme.VibeTube</item>
+    </style>
 </resources>

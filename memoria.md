@@ -204,10 +204,17 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **Tests**: `NextTrackTest` ampliado a 10 casos (secuencial OFF/ALL, ONE, shuffle con y sin orden, fin de lista, lista vacía/desconocida, canción única) — todos en verde.
 - Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (16 tests, 0 fallos).
 
+### Iteración 8 — Añadir canciones por enlace con varios enlaces a la vez (04-08-2026)
+- **Diálogo multilínea** (`UrlDialog` en `MainActivity`): el campo "Por enlace" ahora es un `OutlinedTextField` multilínea (`singleLine = false`, `maxLines = 6`) con placeholder "Pega uno o varios enlaces de YouTube (uno por línea o separados por coma)". El diálogo incluye además un **selector de lista de destino** (radio buttons con las listas propias del usuario) y el botón "Añadir" se habilita solo con texto y lista seleccionada.
+- **Extracción de IDs** (`YouTubeLinkParser.extractVideoIds`): nueva función helper que soporta enlaces `watch`/`embed`/`shorts`/`live`/`youtu.be` e IDs limpios de 11 caracteres; limpia espacios, omite líneas vacías y elimina duplicados. `extractVideoId` (strict, un solo enlace) se mantiene intacto.
+- **Añadido masivo** (`PlaylistRepository.addMultipleTracks` + `PlaylistsViewModel.addMultipleTracksByUrls(urlsText, playlistId)`): extrae y valida los IDs, consulta metadatos vía oEmbed, descarta canciones ya presentes en la lista, aplica el overlay optimista `pendingTrackAdds` (evita el rollback por snapshot) e inserta todo de forma **agrupada en una sola escritura atómica** (`FieldValue.arrayUnion` con todos los mapas). Confirma con Toast: "Se ha añadido 1 canción a la lista" / "Se han añadido N canciones a la lista".
+- **Tests**: `YouTubeLinkParserTest` ampliado a 9 casos (extracción múltiple mixta, dedup de duplicados + líneas vacías, IDs limpios, texto sin enlaces). Total 20 tests en verde.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde.
+
 ## Pendiente / ideas
 - ~~Reproducción automática de la siguiente canción al terminar.~~ **Hecho y validado** (Iteración 6): `onVideoEnded` → `playNextTrack`/`playNextSavedTrack` → `loadVideoById` → siguiente canción, sin flood y sin saturar el main thread.
 - ~~Editar listas (título/descripción, toggle público).~~ **Hecho**.
 - ~~Modo de reproducción secuencial o aleatoria (shuffle).~~ **Hecho** (Iteración 7): selector en el reproductor de las listas con Shuffle (ON/OFF) y Repeat que cicla OFF → ALL → ONE.
-- **Botón "Por enlace" con varios enlaces a la vez**: ampliar el diálogo actual para pegar/validar múltiples URLs de YouTube y añadirlas de una vez a una lista.
+- ~~Botón "Por enlace" con varios enlaces a la vez.~~ **Hecho** (Iteración 8): diálogo multilínea + selector de lista de destino + `extractVideoIds` + `addMultipleTracksByUrls` con escritura agrupada y Toast de confirmación.
 - Subir imagen de avatar/banner/photo (Firebase Storage).
 - **Reglas de seguridad de Firestore**: revisar y endurecer las reglas (búsqueda de `users`, `friend_requests`, subcolecciones `friends`/`savedCollections`) antes de publicar.

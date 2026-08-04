@@ -97,6 +97,24 @@ class PlaylistRepository(
         }
     }
 
+    // Añade varias canciones de forma agrupada en una sola escritura atómica:
+    // arrayUnion con todos los mapas añade cada canción que no esté ya presente
+    // (sin duplicados) y await() espera a la confirmación del servidor.
+    suspend fun addMultipleTracks(playlistId: String, songs: List<Song>) {
+        if (songs.isEmpty()) return
+        try {
+            firestore.collection(PLAYLISTS_COLLECTION).document(playlistId)
+                .update(
+                    "tracks",
+                    FieldValue.arrayUnion(*songs.map { it.toFirestoreMap() }.toTypedArray()),
+                )
+                .await()
+        } catch (exception: Exception) {
+            Log.e(TAG, "Error añadiendo ${songs.size} canciones a la lista $playlistId", exception)
+            throw exception
+        }
+    }
+
     suspend fun removeTrack(playlistId: String, songId: String) {
         val reference = firestore.collection(PLAYLISTS_COLLECTION).document(playlistId)
         val snapshot = reference.get().await()

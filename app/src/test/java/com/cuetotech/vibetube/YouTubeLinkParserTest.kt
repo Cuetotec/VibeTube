@@ -49,4 +49,44 @@ class YouTubeLinkParserTest {
         assertNull(YouTubeLinkParser.extractVideoId("https://www.youtube.com/"))
         assertNull(YouTubeLinkParser.extractVideoId("no es una url"))
     }
+
+    @Test
+    fun `extractVideoIds returns multiple ids from mixed text`() {
+        val text = """
+            https://www.youtube.com/watch?v=aaaa11aaaaa
+            https://youtu.be/bbbb11bbbbb
+            Mira esto: https://www.youtube.com/shorts/cccc11ccccc
+            https://www.youtube.com/watch?v=dddd11ddddd, https://youtu.be/eeee11eeeee
+        """.trimIndent()
+        assertEquals(
+            listOf("aaaa11aaaaa", "bbbb11bbbbb", "cccc11ccccc", "dddd11ddddd", "eeee11eeeee"),
+            YouTubeLinkParser.extractVideoIds(text),
+        )
+    }
+
+    @Test
+    fun `extractVideoIds removes duplicates and blank lines`() {
+        val text = """
+            
+            https://www.youtube.com/watch?v=aaaa11aaaaa
+            https://www.youtube.com/watch?v=aaaa11aaaaa
+            
+            aaaa11aaaaa
+        """.trimIndent()
+        assertEquals(listOf("aaaa11aaaaa"), YouTubeLinkParser.extractVideoIds(text))
+    }
+
+    @Test
+    fun `extractVideoIds supports clean 11 character ids`() {
+        assertEquals(
+            listOf("dQw4w9WgXcQ"),
+            YouTubeLinkParser.extractVideoIds("dQw4w9WgXcQ"),
+        )
+    }
+
+    @Test
+    fun `extractVideoIds returns empty for text without ids`() {
+        assertEquals(emptyList<String>(), YouTubeLinkParser.extractVideoIds("no hay enlaces aquí"))
+        assertEquals(emptyList<String>(), YouTubeLinkParser.extractVideoIds(""))
+    }
 }

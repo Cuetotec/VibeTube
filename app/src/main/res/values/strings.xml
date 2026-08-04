@@ -104,7 +104,9 @@
     <string name="create_playlist_public">Lista pública</string>
     <string name="create_playlist_confirm">Crear</string>
     <string name="url_dialog_title">Añadir por enlace de YouTube</string>
-    <string name="url_dialog_field_label">https://www.youtube.com/watch?v=…</string>
+    <string name="url_dialog_field_label">Enlaces de YouTube</string>
+    <string name="url_dialog_field_placeholder">Pega uno o varios enlaces de YouTube (uno por línea o separados por coma)</string>
+    <string name="url_dialog_target_label">Lista de destino</string>
     <string name="url_dialog_add">Añadir</string>
     <string name="common_cancel">Cancelar</string>
 </resources>

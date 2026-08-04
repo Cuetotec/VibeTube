@@ -7,6 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -29,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -165,9 +167,10 @@ private fun MainScreen() {
 
     if (showUrlDialog) {
         UrlDialog(
+            playlists = playlistsUiState.playlists,
             isProcessing = isUrlProcessing,
             error = urlError,
-            onConfirm = playlistsViewModel::processUrl,
+            onConfirm = playlistsViewModel::addMultipleTracksByUrls,
             onDismiss = playlistsViewModel::dismissUrlDialog,
         )
     }
@@ -375,12 +378,14 @@ private fun EditPlaylistDialog(
 
 @Composable
 private fun UrlDialog(
+    playlists: List<Playlist>,
     isProcessing: Boolean,
     error: String?,
-    onConfirm: (String) -> Unit,
+    onConfirm: (String, String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var url by rememberSaveable { mutableStateOf("") }
+    var urlText by rememberSaveable { mutableStateOf("") }
+    var selectedPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -388,12 +393,60 @@ private fun UrlDialog(
         text = {
             Column {
                 OutlinedTextField(
-                    value = url,
-                    onValueChange = { url = it },
+                    value = urlText,
+                    onValueChange = { urlText = it },
                     label = { Text(stringResource(R.string.url_dialog_field_label)) },
-                    singleLine = true,
+                    placeholder = { Text(stringResource(R.string.url_dialog_field_placeholder)) },
+                    singleLine = false,
+                    maxLines = 6,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Spacer(modifier = Modifier.padding(top = 12.dp))
+                Text(
+                    text = stringResource(R.string.url_dialog_target_label),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                if (playlists.isEmpty()) {
+                    Spacer(modifier = Modifier.padding(top = 4.dp))
+                    Text(
+                        text = stringResource(R.string.add_to_playlist_no_lists),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 200.dp)) {
+                        items(playlists, key = { it.id }) { playlist ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedPlaylistId = playlist.id },
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                RadioButton(
+                                    selected = selectedPlaylistId == playlist.id,
+                                    onClick = { selectedPlaylistId = playlist.id },
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = playlist.title,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = stringResource(
+                                            R.string.playlist_tracks_count,
+                                            playlist.tracks.size,
+                                        ),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
                 error?.let {
                     Spacer(modifier = Modifier.padding(top = 8.dp))
                     Text(
@@ -406,8 +459,8 @@ private fun UrlDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(url) },
-                enabled = url.isNotBlank() && !isProcessing,
+                onClick = { selectedPlaylistId?.let { id -> onConfirm(urlText, id) } },
+                enabled = urlText.isNotBlank() && selectedPlaylistId != null && !isProcessing,
             ) {
                 if (isProcessing) {
                     CircularProgressIndicator(

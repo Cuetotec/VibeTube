@@ -504,27 +504,63 @@ class PlaylistsViewModel(
         _toastMessage.value = null
     }
 
-    fun processUrl(url: String) {
+    // Procesa un texto con uno o varios enlaces de YouTube y añade las canciones
+    // de forma agrupada a la lista indicada. Extrae y valida los IDs, descarta
+    // los que ya están en la lista, aplica el overlay optimista (para que un
+    // snapshot desactualizado no revierta la escritura) y confirma con un Toast
+    // con el número de canciones importadas.
+    fun addMultipleTracksByUrls(urlsText: String, playlistId: String) {
         viewModelScope.launch {
             _isUrlProcessing.value = true
             _urlError.value = null
-            val videoId = YouTubeLinkParser.extractVideoId(url)
-            if (videoId == null) {
+            val videoIds = YouTubeLinkParser.extractVideoIds(urlsText)
+            if (videoIds.isEmpty()) {
                 _isUrlProcessing.value = false
-                _urlError.value = "La URL no es un enlace de YouTube válido"
+                _urlError.value = "No se encontraron enlaces de YouTube válidos"
                 return@launch
             }
-            val song = YouTubeLinkParser.fetchVideoInfo(videoId)
-                ?: Song(
-                    id = videoId,
-                    youtubeId = videoId,
-                    title = "Vídeo de YouTube",
-                    artist = "YouTube",
-                    durationSeconds = 0L,
-                )
+            val songs = videoIds.map { videoId ->
+                YouTubeLinkParser.fetchVideoInfo(videoId)
+                    ?: Song(
+                        id = videoId,
+                        youtubeId = videoId,
+                        title = "Vídeo de YouTube",
+                        artist = "YouTube",
+                        durationSeconds = 0L,
+                    )
+            }
+            val playlist = serverPlaylists.find { it.id == playlistId }
+            val newSongs = songs.filter { song ->
+                playlist?.tracks?.any { it.id == song.id } != true &&
+                    pendingTrackAdds[playlistId].orEmpty().none { it.id == song.id }
+            }
+            if (newSongs.isEmpty()) {
+                _isUrlProcessing.value = false
+                _urlError.value = "Las canciones ya están en la lista"
+                return@launch
+            }
+            pendingTrackAdds.getOrPut(playlistId) { mutableListOf() }.addAll(newSongs)
+            _uiState.value = _uiState.value.copy(playlists = mergePendingTrackAdds(serverPlaylists))
+            runCatching { playlistRepository.addMultipleTracks(playlistId, newSongs) }
+                .onSuccess {
+                    _showUrlDialog.value = false
+                    _toastMessage.value = if (newSongs.size == 1) {
+                        "Se ha añadido 1 canción a la lista"
+                    } else {
+                        "Se han añadido ${newSongs.size} canciones a la lista"
+                    }
+                }
+                .onFailure { exception ->
+                    pendingTrackAdds[playlistId]?.removeAll(newSongs.toSet())
+                    pendingTrackAdds.entries.removeIf { it.value.isEmpty() }
+                    _uiState.value = _uiState.value.copy(
+                        playlists = mergePendingTrackAdds(serverPlaylists),
+                        error = exception.message ?: "No se pudieron añadir las canciones",
+                    )
+                    _urlError.value = exception.message ?: "No se pudieron añadir las canciones"
+                    _toastMessage.value = "Error: ${exception.message ?: "No se pudieron añadir las canciones"}"
+                }
             _isUrlProcessing.value = false
-            _showUrlDialog.value = false
-            _pendingSong.value = song
         }
     }
 

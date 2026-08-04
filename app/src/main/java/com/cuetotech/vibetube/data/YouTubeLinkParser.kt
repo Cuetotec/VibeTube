@@ -12,8 +12,36 @@ object YouTubeLinkParser {
         """.*(?:youtube\.com/(?:watch\?.*v=|embed/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11}).*""",
     )
 
+    // Para extraer varios IDs de un texto arbitrario (sin anclas de inicio/fin):
+    // encuentra cualquier enlace de YouTube en la línea.
+    private val VIDEO_ID_FIND_PATTERN = Regex(
+        """(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})""",
+    )
+
+    // Fallback para IDs limpios de 11 caracteres sueltos en el texto.
+    private val CLEAN_VIDEO_ID_PATTERN = Regex("""\b[A-Za-z0-9_-]{11}\b""")
+
     fun extractVideoId(url: String): String? {
         return VIDEO_ID_PATTERN.matchEntire(url.trim())?.groupValues?.get(1)
+    }
+
+    // Extrae todos los IDs de YouTube de un texto arbitrario. Soporta enlaces
+    // watch/embed/shorts/live/youtu.be y IDs limpios de 11 caracteres. Limpia
+    // espacios en blanco, omite líneas vacías y elimina duplicados.
+    fun extractVideoIds(text: String): List<String> {
+        return text.lineSequence()
+            .flatMap { line ->
+                val fromLinks = VIDEO_ID_FIND_PATTERN.findAll(line).map { it.groupValues[1] }.toList()
+                if (fromLinks.isNotEmpty()) {
+                    fromLinks.asSequence()
+                } else {
+                    CLEAN_VIDEO_ID_PATTERN.findAll(line).map { it.value }
+                }
+            }
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .toList()
     }
 
     suspend fun fetchVideoInfo(videoId: String): Song? = withContext(Dispatchers.IO) {

@@ -305,6 +305,7 @@ fun YouTubePlayerView(
     showAddSong: Boolean = true,
     onEnded: () -> Unit = {},
     onStateChange: ((Int) -> Unit)? = null,
+    playbackTick: Int = 0,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -480,6 +481,21 @@ fun YouTubePlayerView(
                     queueVideoInPlayer(webView, videoId)
                 }
             }
+        }
+    }
+
+    // Repetición de la canción actual (RepeatMode.ONE): cuando el ViewModel
+    // incrementa el token SIN cambiar de pista, se vuelve a ejecutar
+    // loadVideoById sobre el mismo vídeo (reinicio desde el principio). El
+    // token no se reinicia con avances normales, porque ahí el cambio de
+    // videoId ya dispara la carga en el LaunchedEffect(videoId).
+    LaunchedEffect(playbackTick) {
+        if (playbackTick > 0 && videoId.isNotBlank() &&
+            playerRef.loadedVideoId == videoId && playerReady
+        ) {
+            Log.d(TAG, "Reiniciando canción actual (RepeatMode.ONE): $videoId")
+            playerRef.endedHandled = false
+            playerRef.view?.let { webView -> loadVideoInPlayer(webView, videoId) }
         }
     }
 }

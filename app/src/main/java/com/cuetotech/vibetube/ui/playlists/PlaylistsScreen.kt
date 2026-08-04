@@ -23,10 +23,15 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -62,6 +67,9 @@ fun PlaylistsScreen(
     val currentSong by viewModel.currentSong.collectAsState()
     val savedPlaylists by viewModel.savedPlaylists.collectAsState()
     val selectedSavedId by viewModel.selectedSavedId.collectAsState()
+    val isShuffleEnabled by viewModel.isShuffleEnabled.collectAsState()
+    val repeatMode by viewModel.repeatMode.collectAsState()
+    val playbackTick by viewModel.playbackTick.collectAsState()
 
     val selectedPlaylist = uiState.playlists.find { it.id == selectedPlaylistId }
     val selectedSaved = savedPlaylists.find { it.playlist.id == selectedSavedId }
@@ -106,8 +114,14 @@ fun PlaylistsScreen(
             currentSong = currentSong,
             ownerLabel = selectedSaved.ownerDisplayName,
             isSaved = true,
+            isShuffleEnabled = isShuffleEnabled,
+            repeatMode = repeatMode,
+            playbackTick = playbackTick,
+            onToggleShuffle = viewModel::toggleShuffle,
+            onCycleRepeat = viewModel::cycleRepeatMode,
             onBack = viewModel::closeSavedPlaylist,
             onSelectTrack = viewModel::selectSavedTrack,
+            onStartPlayback = viewModel::startSavedPlayback,
             onEnded = viewModel::playNextSavedTrack,
             onUnsave = { viewModel.unsavePlaylist(selectedSaved.playlist.id) },
             onBrowse = onBrowse,
@@ -118,8 +132,14 @@ fun PlaylistsScreen(
             playlist = selectedPlaylist,
             currentSong = currentSong,
             isSaved = false,
+            isShuffleEnabled = isShuffleEnabled,
+            repeatMode = repeatMode,
+            playbackTick = playbackTick,
+            onToggleShuffle = viewModel::toggleShuffle,
+            onCycleRepeat = viewModel::cycleRepeatMode,
             onBack = viewModel::closePlaylist,
             onSelectTrack = viewModel::selectTrack,
+            onStartPlayback = viewModel::startPlayback,
             onEnded = viewModel::playNextTrack,
             onRemoveTrack = { songId -> viewModel.removeTrack(selectedPlaylist.id, songId) },
             onAddSong = viewModel::openAddSongDialog,
@@ -388,8 +408,14 @@ private fun PlaylistCard(
 private fun PlaylistDetail(
     playlist: Playlist,
     currentSong: Song?,
+    isShuffleEnabled: Boolean,
+    repeatMode: RepeatMode,
+    playbackTick: Int,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
     onBack: () -> Unit,
     onSelectTrack: (String) -> Unit,
+    onStartPlayback: () -> Unit = {},
     onEnded: () -> Unit = {},
     onRemoveTrack: ((String) -> Unit)? = null,
     onAddSong: ((Song) -> Unit)? = null,
@@ -401,8 +427,10 @@ private fun PlaylistDetail(
 ) {
     val tracks = playlist.tracks
     val selectedSong = currentSong
+    val hasValidSong = selectedSong != null && selectedSong.youtubeId.isNotBlank()
 
-    Column(modifier = modifier.fillMaxSize()) {
+    Box(modifier = modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -448,14 +476,16 @@ private fun PlaylistDetail(
             }
         }
 
-        // El reproductor solo se instancia cuando el usuario entró en el detalle
-        // de una lista Y hay un vídeo válido seleccionado (currentSong resuelto).
-        if (selectedSong != null && selectedSong.youtubeId.isNotBlank()) {
+        // El reproductor solo se instancia cuando el usuario eligió
+        // explícitamente una canción (tocándola o con el botón Play): al abrir la
+        // lista no hay selección (currentSong == null) y no se carga ningún vídeo.
+        if (hasValidSong) {
             YouTubePlayerView(
                 currentSong = selectedSong,
                 onAddSong = { onAddSong?.invoke(selectedSong) },
                 showAddSong = !isSaved,
                 onEnded = onEnded,
+                playbackTick = playbackTick,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(220.dp)
@@ -464,17 +494,36 @@ private fun PlaylistDetail(
                     .background(MaterialTheme.colorScheme.surfaceContainer),
             )
 
+            PlayerModeControls(
+                isShuffleEnabled = isShuffleEnabled,
+                repeatMode = repeatMode,
+                onToggleShuffle = onToggleShuffle,
+                onCycleRepeat = onCycleRepeat,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+        }
+
+        if (tracks.isNotEmpty()) {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                contentPadding = PaddingValues(vertical = 8.dp),
+                // Espacio inferior extra cuando el FAB de Play está visible
+                // (lista sin reproducción activa).
+                contentPadding = PaddingValues(
+                    start = 0.dp,
+                    top = 8.dp,
+                    end = 0.dp,
+                    bottom = if (hasValidSong) 8.dp else 96.dp,
+                ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(tracks, key = { it.id }) { track ->
                     SongItem(
                         song = track,
-                        highlighted = track.id == selectedSong.id,
+                        highlighted = track.id == selectedSong?.id,
                         onClick = { onSelectTrack(track.id) },
                         trailingContent = {
                             if (onRemoveTrack != null) {
@@ -494,17 +543,81 @@ private fun PlaylistDetail(
         } else {
             EmptyState(
                 icon = Icons.Filled.LibraryMusic,
-                title = stringResource(
-                    if (tracks.isEmpty()) R.string.playlist_no_tracks_title
-                    else R.string.playlist_select_video_title,
-                ),
-                subtitle = stringResource(
-                    if (tracks.isEmpty()) R.string.playlist_no_tracks_subtitle
-                    else R.string.playlist_select_video_subtitle,
-                ),
+                title = stringResource(R.string.playlist_no_tracks_title),
+                subtitle = stringResource(R.string.playlist_no_tracks_subtitle),
                 actionLabel = stringResource(R.string.empty_browse_button),
                 onAction = onBrowse,
-                modifier = modifier,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        }
+
+        // Botón flotante de Play: visible solo cuando la lista tiene canciones
+        // pero aún no se está reproduciendo ninguna (currentSong == null). Inicia
+        // la reproducción con la primera canción (o una al azar con shuffle).
+        if (tracks.isNotEmpty() && !hasValidSong) {
+            FloatingActionButton(
+                onClick = onStartPlayback,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = stringResource(R.string.playlist_play),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerModeControls(
+    isShuffleEnabled: Boolean,
+    repeatMode: RepeatMode,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onToggleShuffle) {
+            Icon(
+                imageVector = Icons.Filled.Shuffle,
+                contentDescription = stringResource(
+                    if (isShuffleEnabled) R.string.player_shuffle_on
+                    else R.string.player_shuffle_off,
+                ),
+                tint = if (isShuffleEnabled) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        IconButton(onClick = onCycleRepeat) {
+            Icon(
+                imageVector = if (repeatMode == RepeatMode.ONE) {
+                    Icons.Filled.RepeatOne
+                } else {
+                    Icons.Filled.Repeat
+                },
+                contentDescription = stringResource(
+                    when (repeatMode) {
+                        RepeatMode.OFF -> R.string.player_repeat_off
+                        RepeatMode.ALL -> R.string.player_repeat_all
+                        RepeatMode.ONE -> R.string.player_repeat_one
+                    },
+                ),
+                tint = if (repeatMode != RepeatMode.OFF) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
             )
         }
     }

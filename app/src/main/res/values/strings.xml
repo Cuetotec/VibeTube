@@ -35,6 +35,11 @@
     <string name="player_add_to_playlist">Añadir a una lista</string>
     <string name="player_error_message">Este vídeo no se puede reproducir dentro de la app.</string>
     <string name="player_error_open_in_youtube">Abrir en YouTube</string>
+    <string name="player_shuffle_on">Aleatorio activado</string>
+    <string name="player_shuffle_off">Aleatorio desactivado</string>
+    <string name="player_repeat_off">Repetir desactivado</string>
+    <string name="player_repeat_all">Repetir lista</string>
+    <string name="player_repeat_one">Repetir canción</string>
 
     <!-- Listas de reproducción -->
     <string name="playlists_title">Mis Colecciones</string>
@@ -48,12 +53,11 @@
     <string name="playlist_tracks_count">%1$d canciones</string>
     <string name="playlist_no_tracks_title">Esta lista no tiene vídeos añadidos</string>
     <string name="playlist_no_tracks_subtitle">Busca en Inicio y añádelas con el botón «+»</string>
-    <string name="playlist_select_video_title">Selecciona un vídeo para reproducir</string>
-    <string name="playlist_select_video_subtitle">Toca un vídeo de la lista para empezar</string>
     <string name="playlist_delete">Eliminar lista</string>
     <string name="playlist_edit">Editar lista</string>
     <string name="playlist_remove_track">Quitar canción de la lista</string>
     <string name="playlist_back">Volver a mis colecciones</string>
+    <string name="playlist_play">Reproducir lista</string>
     <string name="playlist_unsave">Quitar de Mis Colecciones</string>
     <string name="edit_playlist_title">Editar lista</string>
     <string name="edit_playlist_title_label">Título</string>

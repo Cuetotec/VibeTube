@@ -191,10 +191,23 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **Aprendizaje de diagnóstico**: `adb logcat -d | grep INFO:CONSOLE` captura el `console.log` de páginas `loadDataWithBaseURL`, pero bajo un flood de decenas de miles de líneas el buffer lo sobrescribe; por eso las sondas del puente deben escribirse **directo a logcat** (sin `mainHandler.post`) y muestrear cada N llamadas.
 - Build/tests en verde: `./gradlew :app:assembleDebug :app:testDebugUnitTest`.
 
+### Iteración 7 — Modo de reproducción: shuffle, repetir lista y repetir canción (04-08-2026)
+- **Estado en el ViewModel** (`PlaylistsViewModel`): nuevo `enum RepeatMode { OFF, ALL, ONE }`, y `StateFlow`s observables `isShuffleEnabled`, `repeatMode` y `playbackTick`. Con el aleatorio activado se mantiene un **orden permutado de pistas** (`shuffleOrder`, con la canción actual en primera posición) que garantiza no repetir canciones hasta agotar la lista; se reconstruye al abrir/selectar una lista o al activar el shuffle (`rebuildShuffleOrder`).
+- **Lógica de avance** (`nextTrack`, función pura en lugar de `nextTrackId`): combina `RepeatMode` + `isShuffleEnabled`.
+  - `RepeatMode.ONE`: mantiene la canción actual; el reproductor la reinicia.
+  - Shuffle activo: avanza por el orden permutado (sin repeticiones).
+  - `RepeatMode.OFF`: en la última canción **no avanza más** (fin de lista).
+  - `RepeatMode.ALL`: en la última canción vuelve al inicio (0 o inicio del orden aleatorio).
+- **Reinicio de la canción actual (ONE)**: `playNextTrack`/`playNextSavedTrack` no cambian el `videoId` (el `StateFlow` no re-emite), así que se incrementa un token `playbackTick`; `YouTubePlayerView` lo observa y vuelve a ejecutar `loadVideoById + playVideo` sobre el mismo vídeo.
+- **UI** (`PlaylistsScreen`): `PlayerModeControls` bajo el reproductor con botón **Shuffle** (color primario cuando está activo) y botón **Repeat** que cicla OFF → ALL → ONE (icono `Repeat`/`RepeatOne`, color primario cuando activo; content descriptions en `strings.xml`). Aplica tanto a listas propias como guardadas.
+- **Ajuste UX (reproducción inicial)**: al abrir o seleccionar una lista **ya no se selecciona ni reproduce la primera canción** — `openPlaylist`/`openSavedPlaylist` dejan `currentSong == null` y el reproductor no se compone (nada de `loadVideoById` al cargar datos). La reproducción arranca solo con acción explícita: **tocar una canción** la selecciona y reproduce, o pulsar el **FAB de Play** (visible cuando la lista tiene canciones pero nada se está reproduciendo) que inicia con la primera canción (o una al azar si el shuffle está activado). Nuevos `startPlayback`/`startSavedPlayback` en el ViewModel y reestructuración de `PlaylistDetail` (la lista de pistas siempre visible; se eliminaron las cadenas `playlist_select_video_*`).
+- **Tests**: `NextTrackTest` ampliado a 10 casos (secuencial OFF/ALL, ONE, shuffle con y sin orden, fin de lista, lista vacía/desconocida, canción única) — todos en verde.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (16 tests, 0 fallos).
+
 ## Pendiente / ideas
 - ~~Reproducción automática de la siguiente canción al terminar.~~ **Hecho y validado** (Iteración 6): `onVideoEnded` → `playNextTrack`/`playNextSavedTrack` → `loadVideoById` → siguiente canción, sin flood y sin saturar el main thread.
 - ~~Editar listas (título/descripción, toggle público).~~ **Hecho**.
-- **Modo de reproducción secuencial o aleatoria (shuffle)**: añadir selector en el reproductor de las listas (orden/secuencia, aleatorio, repetir).
+- ~~Modo de reproducción secuencial o aleatoria (shuffle).~~ **Hecho** (Iteración 7): selector en el reproductor de las listas con Shuffle (ON/OFF) y Repeat que cicla OFF → ALL → ONE.
 - **Botón "Por enlace" con varios enlaces a la vez**: ampliar el diálogo actual para pegar/validar múltiples URLs de YouTube y añadirlas de una vez a una lista.
 - Subir imagen de avatar/banner/photo (Firebase Storage).
 - **Reglas de seguridad de Firestore**: revisar y endurecer las reglas (búsqueda de `users`, `friend_requests`, subcolecciones `friends`/`savedCollections`) antes de publicar.

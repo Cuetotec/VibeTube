@@ -36,14 +36,47 @@ data class PlaylistsUiState(
 
 private const val TAG = "VibeTubePlayer"
 
-// Devuelve el id de la siguiente canción según el índice actual (index + 1).
-// Decisión de fin de lista: en la última canción se reinicia desde la 0 (bucle),
-// para que el autoplay nunca se detenga en pantalla negra.
-internal fun nextTrackId(currentTrackId: String?, tracks: List<Song>): String? {
-    if (tracks.isEmpty()) return null
+// Modo de repetición del reproductor: OFF (sin repetición), ALL (repetición de
+// toda la lista) y ONE (repetición de la canción actual).
+enum class RepeatMode { OFF, ALL, ONE }
+
+// Devuelve el id de la siguiente canción según la combinación activa de
+// RepeatMode e isShuffleEnabled:
+//  - RepeatMode.ONE: mantiene la canción actual (el reproductor la reinicia).
+//  - Shuffle activo: avanza por el orden permutado (shuffleOrder) sin repetir
+//    canciones hasta agotar la lista.
+//  - RepeatMode.OFF: en la última canción no avanza más (null).
+//  - RepeatMode.ALL: en la última canción vuelve al inicio (0 o inicio del
+//    orden aleatorio).
+internal fun nextTrack(
+    currentTrackId: String?,
+    tracks: List<Song>,
+    repeatMode: RepeatMode,
+    isShuffleEnabled: Boolean,
+    shuffleOrder: List<String>,
+): String? {
+    if (tracks.isEmpty() || currentTrackId == null) return null
+    if (repeatMode == RepeatMode.ONE) return currentTrackId
+    val size = tracks.size
+    if (isShuffleEnabled && shuffleOrder.isNotEmpty()) {
+        val position = shuffleOrder.indexOf(currentTrackId)
+        if (position >= 0) {
+            val nextPosition = position + 1
+            return when {
+                nextPosition < size -> shuffleOrder[nextPosition]
+                repeatMode == RepeatMode.ALL -> shuffleOrder[0]
+                else -> null
+            }
+        }
+    }
     val index = tracks.indexOfFirst { it.id == currentTrackId }
     if (index < 0) return null
-    return tracks[(index + 1) % tracks.size].id
+    val nextIndex = index + 1
+    return when {
+        nextIndex < size -> tracks[nextIndex].id
+        repeatMode == RepeatMode.ALL -> tracks[0].id
+        else -> null
+    }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
@@ -68,6 +101,25 @@ class PlaylistsViewModel(
     val selectedSavedId: StateFlow<String?> = _selectedSavedId.asStateFlow()
 
     private val _selectedSavedTrackId = MutableStateFlow<String?>(null)
+
+    // Estado del modo de reproducción. Con el aleatorio activado se mantiene un
+    // orden permutado (shuffleOrder) de las pistas activas que garantiza no
+    // repetir ninguna canción hasta haber escuchado todas.
+    private val _isShuffleEnabled = MutableStateFlow(false)
+    val isShuffleEnabled: StateFlow<Boolean> = _isShuffleEnabled.asStateFlow()
+
+    private val _repeatMode = MutableStateFlow(RepeatMode.OFF)
+    val repeatMode: StateFlow<RepeatMode> = _repeatMode.asStateFlow()
+
+    // Token de reproducción: se incrementa cuando la canción actual debe
+    // reiniciarse (RepeatMode.ONE). El reproductor observa este valor para
+    // volver a ejecutar loadVideoById sobre la misma pista.
+    private val _playbackTick = MutableStateFlow(0)
+    val playbackTick: StateFlow<Int> = _playbackTick.asStateFlow()
+
+    // Orden aleatorio vigente: ids de las pistas activas permutados, con la
+    // canción actual en primera posición.
+    private var shuffleOrder: List<String> = emptyList()
 
     // Canción actualmente en reproducción, derivada de la selección activa
     // (lista propia o guardada) y de las tracks que el ViewModel mantiene
@@ -156,8 +208,11 @@ class PlaylistsViewModel(
 
     fun openPlaylist(playlistId: String) {
         _selectedPlaylistId.value = playlistId
-        val playlist = _uiState.value.playlists.find { it.id == playlistId }
-        _selectedTrackId.value = playlist?.tracks?.firstOrNull()?.id
+        // No se selecciona ni se reproduce ninguna canción al abrir la lista: la
+        // reproducción solo comienza con una acción explícita del usuario
+        // (tocar una canción o pulsar Play). currentSong se queda en null.
+        _selectedTrackId.value = null
+        rebuildShuffleOrder()
     }
 
     fun closePlaylist() {
@@ -167,12 +222,15 @@ class PlaylistsViewModel(
 
     fun selectTrack(songId: String) {
         _selectedTrackId.value = songId
+        rebuildShuffleOrder()
     }
 
     fun openSavedPlaylist(savedPlaylistId: String) {
         _selectedSavedId.value = savedPlaylistId
-        val saved = _savedPlaylists.value.find { it.playlist.id == savedPlaylistId }
-        _selectedSavedTrackId.value = saved?.playlist?.tracks?.firstOrNull()?.id
+        // Igual que openPlaylist: sin reproducción automática de la primera
+        // canción; el usuario debe elegir o pulsar Play.
+        _selectedSavedTrackId.value = null
+        rebuildShuffleOrder()
     }
 
     fun closeSavedPlaylist() {
@@ -182,6 +240,105 @@ class PlaylistsViewModel(
 
     fun selectSavedTrack(songId: String) {
         _selectedSavedTrackId.value = songId
+        rebuildShuffleOrder()
+    }
+
+    // Inicia la reproducción desde el principio de la lista propia seleccionada:
+    // la primera canción (secuencial) o una al azar si el shuffle está activado.
+    fun startPlayback() {
+        val playlist = _uiState.value.playlists.find { it.id == _selectedPlaylistId.value }
+            ?: return
+        val tracks = playlist.tracks
+        if (tracks.isEmpty()) return
+        if (_isShuffleEnabled.value) {
+            rebuildShuffleOrder()
+            _selectedTrackId.value = shuffleOrder.first()
+        } else {
+            _selectedTrackId.value = tracks.first().id
+        }
+    }
+
+    // Versión de startPlayback para listas guardadas.
+    fun startSavedPlayback() {
+        val saved = _savedPlaylists.value.find { it.playlist.id == _selectedSavedId.value }
+            ?: return
+        val tracks = saved.playlist.tracks
+        if (tracks.isEmpty()) return
+        if (_isShuffleEnabled.value) {
+            rebuildShuffleOrder()
+            _selectedSavedTrackId.value = shuffleOrder.first()
+        } else {
+            _selectedSavedTrackId.value = tracks.first().id
+        }
+    }
+
+    // Alterna el modo aleatorio. Al activarlo se genera un nuevo orden permutado
+    // de las pistas activas; al desactivarlo se descarta el orden.
+    fun toggleShuffle() {
+        _isShuffleEnabled.value = !_isShuffleEnabled.value
+        if (_isShuffleEnabled.value) {
+            rebuildShuffleOrder()
+        } else {
+            shuffleOrder = emptyList()
+        }
+    }
+
+    // Cicla el modo de repetición: OFF -> ALL -> ONE -> OFF.
+    fun cycleRepeatMode() {
+        _repeatMode.value = when (_repeatMode.value) {
+            RepeatMode.OFF -> RepeatMode.ALL
+            RepeatMode.ALL -> RepeatMode.ONE
+            RepeatMode.ONE -> RepeatMode.OFF
+        }
+    }
+
+    // Reconstruye el orden aleatorio sobre las pistas activas (lista propia o
+    // guardada seleccionada). La canción actual queda en primera posición para
+    // continuar desde la pista elegida; el resto se permuta sin repeticiones.
+    private fun rebuildShuffleOrder() {
+        if (!_isShuffleEnabled.value) return
+        val currentId = when {
+            _selectedPlaylistId.value != null -> _selectedTrackId.value
+            else -> _selectedSavedTrackId.value
+        }
+        val ids = activeTracks().map { it.id }.distinct()
+        shuffleOrder = listOfNotNull(currentId) + ids.filterNot { it == currentId }.shuffled()
+    }
+
+    private fun activeTracks(): List<Song> {
+        val playlistId = _selectedPlaylistId.value
+        if (playlistId != null) {
+            return _uiState.value.playlists.find { it.id == playlistId }?.tracks.orEmpty()
+        }
+        val savedId = _selectedSavedId.value
+        if (savedId != null) {
+            return _savedPlaylists.value.find { it.playlist.id == savedId }?.playlist?.tracks.orEmpty()
+        }
+        return emptyList()
+    }
+
+    // Aplica el resultado de nextTrack sobre la selección activa:
+    //  - nextId == null: fin de lista (RepeatMode.OFF), no se avanza.
+    //  - nextId distinta: avanza la selección a la siguiente canción.
+    //  - nextId == actual (RepeatMode.ONE): incrementa el token para que el
+    //    reproductor reinicie la canción actual.
+    private fun advanceSelection(
+        nextId: String?,
+        currentId: String?,
+        label: String,
+        onSelect: (String) -> Unit,
+    ) {
+        when {
+            nextId == null -> Log.d(TAG, "$label: fin de lista, no se avanza")
+            nextId != currentId -> {
+                onSelect(nextId)
+                Log.d(TAG, "$label: canción activa avanzada a $nextId")
+            }
+            else -> {
+                _playbackTick.value += 1
+                Log.d(TAG, "$label: RepeatMode.ONE, reiniciando canción $nextId")
+            }
+        }
     }
 
     fun playNextTrack() {
@@ -192,19 +349,22 @@ class PlaylistsViewModel(
             }
         val tracks = playlist.tracks
         val currentId = _selectedTrackId.value
-        val currentIndex = tracks.indexOfFirst { it.id == currentId }
-        val nextId = nextTrackId(currentId, tracks)
+        val nextId = nextTrack(
+            currentId,
+            tracks,
+            _repeatMode.value,
+            _isShuffleEnabled.value,
+            shuffleOrder,
+        )
         Log.d(
             TAG,
-            "playNextTrack: índice actual=$currentIndex (canción=$currentId) -> " +
-                "siguiente=${nextId ?: "ninguna"} de ${tracks.size} canciones en memoria",
+            "playNextTrack: (canción=$currentId) -> siguiente=${nextId ?: "ninguna"} de " +
+                "${tracks.size} canciones (repeat=${_repeatMode.value}, " +
+                "shuffle=${_isShuffleEnabled.value})",
         )
-        if (nextId != null) {
-            _selectedTrackId.value = nextId
-            // currentSong es derivado de la selección y se actualiza
-            // automáticamente con el objeto de la siguiente canción.
-            Log.d(TAG, "playNextTrack: canción activa avanzada a $nextId")
-        }
+        // currentSong es derivado de la selección y se actualiza automáticamente
+        // con el objeto de la siguiente canción.
+        advanceSelection(nextId, currentId, "playNextTrack") { _selectedTrackId.value = it }
     }
 
     fun playNextSavedTrack() {
@@ -215,18 +375,23 @@ class PlaylistsViewModel(
             }
         val tracks = saved.playlist.tracks
         val currentId = _selectedSavedTrackId.value
-        val currentIndex = tracks.indexOfFirst { it.id == currentId }
-        val nextId = nextTrackId(currentId, tracks)
+        val nextId = nextTrack(
+            currentId,
+            tracks,
+            _repeatMode.value,
+            _isShuffleEnabled.value,
+            shuffleOrder,
+        )
         Log.d(
             TAG,
-            "playNextSavedTrack: índice actual=$currentIndex (canción=$currentId) -> " +
-                "siguiente=${nextId ?: "ninguna"} de ${tracks.size} canciones en memoria",
+            "playNextSavedTrack: (canción=$currentId) -> siguiente=${nextId ?: "ninguna"} de " +
+                "${tracks.size} canciones (repeat=${_repeatMode.value}, " +
+                "shuffle=${_isShuffleEnabled.value})",
         )
-        if (nextId != null) {
-            _selectedSavedTrackId.value = nextId
-            // currentSong es derivado de la selección y se actualiza
-            // automáticamente con el objeto de la siguiente canción.
-            Log.d(TAG, "playNextSavedTrack: canción activa avanzada a $nextId")
+        // currentSong es derivado de la selección y se actualiza automáticamente
+        // con el objeto de la siguiente canción.
+        advanceSelection(nextId, currentId, "playNextSavedTrack") {
+            _selectedSavedTrackId.value = it
         }
     }
 

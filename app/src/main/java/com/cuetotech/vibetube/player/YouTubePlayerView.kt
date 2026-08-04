@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
@@ -78,42 +79,65 @@ private class PlayerRef {
 }
 
 private class JsBridge(
-    private val onPlayerError: (Int) -> Unit,
-    private val onPlayerStateChange: (Int) -> Unit,
-    private val onVideoEnded: () -> Unit,
-    private val onPlayerReady: () -> Unit,
+    private val errorHandler: (Int) -> Unit,
+    private val stateChangeHandler: (Int) -> Unit,
+    private val endedHandler: () -> Unit,
+    private val readyHandler: () -> Unit,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Deduplicación en Kotlin (defensa ante el bucle del widgetapi): aunque el
+    // JS llame al bridge en ráfagas, solo se REENVÍA al ViewModel el primer
+    // evento y los cambios de estado reales. Evita saturar el main thread.
+    private var lastReadyForward = 0L
+    private var lastStateForward = Int.MIN_VALUE
+    private var lastStateForwardTime = 0L
+    private var lastEndedForward = 0L
+    private val minForwardIntervalMs = 500L
+    private val minStateIntervalMs = 300L
 
     @JavascriptInterface
     fun onPlayerError(errorCode: Int) {
         mainHandler.post {
             Log.d(TAG, "onPlayerError: code=$errorCode")
-            onPlayerError(errorCode)
+            errorHandler(errorCode)
         }
     }
 
     @JavascriptInterface
     fun onPlayerStateChange(stateCode: Int) {
-        mainHandler.post {
-            Log.d(TAG, "onPlayerStateChange: state=$stateCode")
-            onPlayerStateChange(stateCode)
+        val now = SystemClock.elapsedRealtime()
+        if (stateCode != lastStateForward && now - lastStateForwardTime > minStateIntervalMs) {
+            lastStateForward = stateCode
+            lastStateForwardTime = now
+            mainHandler.post {
+                Log.d(TAG, "onPlayerStateChange: state=$stateCode")
+                stateChangeHandler(stateCode)
+            }
         }
     }
 
     @JavascriptInterface
     fun onVideoEnded() {
-        mainHandler.post {
-            Log.d(TAG, "onVideoEnded: el vídeo terminó, avanzando a la siguiente canción")
-            onVideoEnded()
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastEndedForward > minForwardIntervalMs) {
+            lastEndedForward = now
+            mainHandler.post {
+                Log.d(TAG, "onVideoEnded: el vídeo terminó, avanzando a la siguiente canción")
+                endedHandler()
+            }
         }
     }
 
     @JavascriptInterface
     fun onPlayerReady() {
-        mainHandler.post {
-            Log.d(TAG, "onPlayerReady: reproductor JS listo")
-            onPlayerReady()
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastReadyForward > minForwardIntervalMs) {
+            lastReadyForward = now
+            mainHandler.post {
+                Log.d(TAG, "onPlayerReady: reproductor JS listo")
+                readyHandler()
+            }
         }
     }
 }
@@ -146,15 +170,23 @@ private fun buildPlayerHtml(videoId: String): String {
 
             var bridge = function() { return window.$JS_BRIDGE_NAME; };
             var player = null;
+            var lastState = null;
+            var readySent = false;
             var hasEnded = false;
             var pendingJsVideoId = null;
 
             // Notifica el final de vídeo (ENDED, state=0) una sola vez por
             // reproducción: la bandera hasEnded evita que el evento llegue en
             // ráfagas al puente Android/JavaScript y sature la cola de llamadas.
+            // Además solo se reenvía al puente un CAMBIO de estado (el widgetapi
+            // puede repetir el mismo estado en bucle cuando el embed comparte
+            // origen con la página padre).
             function handleState(code) {
-              if (bridge()) {
-                bridge().onPlayerStateChange(code);
+              if (code !== lastState) {
+                lastState = code;
+                if (bridge()) {
+                  bridge().onPlayerStateChange(code);
+                }
               }
               if (code === 0) {
                 if (!hasEnded) {
@@ -176,8 +208,10 @@ private fun buildPlayerHtml(videoId: String): String {
             // carga en cuanto onYouTubeIframeAPIReady cree el player.
             function loadVideo(videoId) {
               // Cambio de vídeo: se reinicia la bandera para que el final de la
-              // nueva reproducción se pueda reportar de nuevo.
+              // nueva reproducción se pueda reportar de nuevo, y el último
+              // estado para que los nuevos estados se reenvíen al puente.
               hasEnded = false;
+              lastState = null;
               if (player) {
                 try {
                   player.loadVideoById(videoId);
@@ -198,11 +232,13 @@ private fun buildPlayerHtml(videoId: String): String {
             function onYouTubeIframeAPIReady() {
               player = new YT.Player('player', {
                 videoId: '$safeId',
-                // Sirve el embed desde el mismo dominio que la página padre:
-                // www-widgetapi.js envía los eventos postMessage por defecto a
-                // www.youtube.com, que no coincide con la Base URL del WebView
-                // (youtube-nocookie.com) y bloquea onStateChange/onVideoEnded.
-                host: '$PLAYER_ORIGIN',
+                // host OMITIDO: el embed se sirve desde www.youtube.com (dominio
+                // por defecto), cross-origin respecto a la Base URL
+                // youtube-nocookie.com. Esto evita el bucle infinito de onReady
+                // que provocaba host=same-origin, y los eventos postMessage
+                // (onReady/onStateChange/onVideoEnded) llegan igualmente al
+                // puente. El iframe del embed es cross-origin y no puede
+                // invocar directamente window.VibeTubeBridge.
                 playerVars: {
                   autoplay: 1,
                   rel: 0,
@@ -213,8 +249,13 @@ private fun buildPlayerHtml(videoId: String): String {
                 },
                 events: {
                   onReady: function() {
-                    if (bridge()) {
-                      bridge().onPlayerReady();
+                    // El widgetapi puede re-despachar onReady en bucle: solo se
+                    // notifica al puente la primera vez (readySent).
+                    if (!readySent) {
+                      readySent = true;
+                      if (bridge()) {
+                        bridge().onPlayerReady();
+                      }
                     }
                     // Fuerza el inicio de la reproducción: el WebView puede
                     // bloquear el autoplay por gestos aunque playerVars tenga
@@ -292,8 +333,8 @@ fun YouTubePlayerView(
                     settings.userAgentString = buildPlayerUserAgent(container.context)
                     addJavascriptInterface(
                         JsBridge(
-                            onPlayerError = { code -> playerError = code },
-                            onPlayerStateChange = { state ->
+                            errorHandler = { code -> playerError = code },
+                            stateChangeHandler = { state ->
                                 Log.d(TAG, "Estado del reproductor: $state (videoId=$newVideoId)")
                                 // PLAYING (1) / BUFFERING (3): la reproducción
                                 // sigue en curso, se vuelve a permitir avanzar
@@ -303,7 +344,7 @@ fun YouTubePlayerView(
                                 }
                                 onStateChange?.invoke(state)
                             },
-                            onVideoEnded = {
+                            endedHandler = {
                                 // Un solo avance por canción: la primera vez que
                                 // llega ENDED se avanza y se marca como manejado;
                                 // cualquier repetición del evento se ignora.
@@ -312,7 +353,7 @@ fun YouTubePlayerView(
                                     onEnded()
                                 }
                             },
-                            onPlayerReady = {
+                            readyHandler = {
                                 playerReady = true
                                 Log.d(TAG, "onPlayerReady (videoId=$newVideoId)")
                             },

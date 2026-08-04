@@ -1,6 +1,11 @@
 package com.cuetotech.vibetube.ui.home
 
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -30,14 +36,22 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -55,6 +69,34 @@ fun HomeScreen(
 ) {
     val profileState by viewModel.profileState.collectAsState()
     val searchState by viewModel.searchState.collectAsState()
+    val isUploadingAvatar by viewModel.isUploadingAvatar.collectAsState()
+    val isUploadingBanner by viewModel.isUploadingBanner.collectAsState()
+    val uploadError by viewModel.uploadError.collectAsState()
+
+    // Indica qué imagen se está seleccionando (avatar o banner) cuando el
+    // selector de galería devuelve el Uri elegido.
+    var pendingImageTarget by remember { mutableStateOf<ImageTarget?>(null) }
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        val target = pendingImageTarget
+        pendingImageTarget = null
+        if (uri != null) {
+            when (target) {
+                ImageTarget.Avatar -> viewModel.uploadAvatar(uri)
+                ImageTarget.Banner -> viewModel.uploadBanner(uri)
+                null -> Unit
+            }
+        }
+    }
+
+    val context = LocalContext.current
+    LaunchedEffect(uploadError) {
+        uploadError?.let { message ->
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            viewModel.clearUploadError()
+        }
+    }
 
     when (val state = profileState) {
         is ProfileUiState.Loading -> Box(
@@ -87,6 +129,16 @@ fun HomeScreen(
         is ProfileUiState.Success -> HomeContent(
             profile = state.profile,
             searchState = searchState,
+            isUploadingAvatar = isUploadingAvatar,
+            isUploadingBanner = isUploadingBanner,
+            onPickAvatar = {
+                pendingImageTarget = ImageTarget.Avatar
+                imagePicker.launch("image/*")
+            },
+            onPickBanner = {
+                pendingImageTarget = ImageTarget.Banner
+                imagePicker.launch("image/*")
+            },
             onQueryChange = viewModel::onQueryChange,
             onRetrySearch = viewModel::retrySearch,
             onAddSong = playlistsViewModel::openAddSongDialog,
@@ -97,10 +149,16 @@ fun HomeScreen(
     }
 }
 
+private enum class ImageTarget { Avatar, Banner }
+
 @Composable
 private fun HomeContent(
     profile: UserProfile,
     searchState: SearchUiState,
+    isUploadingAvatar: Boolean,
+    isUploadingBanner: Boolean,
+    onPickAvatar: () -> Unit,
+    onPickBanner: () -> Unit,
     onQueryChange: (String) -> Unit,
     onRetrySearch: () -> Unit,
     onAddSong: (com.cuetotech.vibetube.data.Song) -> Unit,
@@ -110,7 +168,12 @@ private fun HomeContent(
 ) {
     LazyColumn(modifier = modifier.fillMaxSize()) {
         item(key = "banner") {
-            ProfileBanner(profile = profile, onSignOut = onSignOut)
+            ProfileBanner(
+                profile = profile,
+                isUploading = isUploadingBanner,
+                onPickImage = onPickBanner,
+                onSignOut = onSignOut,
+            )
         }
 
         item(key = "profile_header") {
@@ -120,7 +183,11 @@ private fun HomeContent(
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Avatar(profile = profile)
+                Avatar(
+                    profile = profile,
+                    isUploading = isUploadingAvatar,
+                    onPickImage = onPickAvatar,
+                )
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -280,6 +347,8 @@ private fun HomeContent(
 @Composable
 private fun ProfileBanner(
     profile: UserProfile,
+    isUploading: Boolean,
+    onPickImage: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     Box(modifier = Modifier.fillMaxWidth()) {
@@ -308,6 +377,26 @@ private fun ProfileBanner(
                     .height(150.dp),
             )
         }
+        // La portada es tocable para cambiarla: muestra un indicador de subida
+        // mientras se procesa la imagen elegida.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(150.dp)
+                .clickable(enabled = !isUploading, onClick = onPickImage)
+                .background(Color.Black.copy(alpha = 0.35f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (isUploading) {
+                CircularProgressIndicator(color = Color.White)
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.PhotoCamera,
+                    contentDescription = stringResource(R.string.profile_banner_change),
+                    tint = Color.White,
+                )
+            }
+        }
         IconButton(
             onClick = onSignOut,
             modifier = Modifier
@@ -324,13 +413,20 @@ private fun ProfileBanner(
 }
 
 @Composable
-private fun Avatar(profile: UserProfile) {
+private fun Avatar(
+    profile: UserProfile,
+    isUploading: Boolean,
+    onPickImage: () -> Unit,
+) {
     val avatarUrl = profile.avatarUrl
+    val avatarChangeDescription = stringResource(R.string.profile_avatar_change)
     Box(
         modifier = Modifier
             .size(72.dp)
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.surfaceVariant),
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .semantics { contentDescription = avatarChangeDescription }
+            .clickable(enabled = !isUploading, onClick = onPickImage),
         contentAlignment = Alignment.Center,
     ) {
         if (avatarUrl.isNullOrBlank()) {
@@ -346,6 +442,20 @@ private fun Avatar(profile: UserProfile) {
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
+        }
+        if (isUploading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.5f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    modifier = Modifier.size(28.dp),
+                    strokeWidth = 3.dp,
+                )
+            }
         }
     }
 }

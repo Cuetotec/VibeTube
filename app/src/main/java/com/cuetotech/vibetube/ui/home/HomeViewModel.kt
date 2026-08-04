@@ -2,7 +2,9 @@ package com.cuetotech.vibetube.ui.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import android.net.Uri
 import com.cuetotech.vibetube.data.AuthRepository
+import com.cuetotech.vibetube.data.ProfileStorageRepository
 import com.cuetotech.vibetube.data.Song
 import com.cuetotech.vibetube.data.UserProfile
 import com.cuetotech.vibetube.data.UserProfileRepository
@@ -40,6 +42,7 @@ class HomeViewModel(
     private val authRepository: AuthRepository = AuthRepository(),
     private val profileRepository: UserProfileRepository = UserProfileRepository(),
     private val searchRepository: YouTubeSearchRepository = YouTubeSearchRepository(),
+    private val storageRepository: ProfileStorageRepository = ProfileStorageRepository(),
 ) : ViewModel() {
 
     private val _profileState = MutableStateFlow<ProfileUiState>(ProfileUiState.Loading)
@@ -47,6 +50,17 @@ class HomeViewModel(
 
     private val _searchState = MutableStateFlow(SearchUiState())
     val searchState: StateFlow<SearchUiState> = _searchState.asStateFlow()
+
+    private val _isUploadingAvatar = MutableStateFlow(false)
+    val isUploadingAvatar: StateFlow<Boolean> = _isUploadingAvatar.asStateFlow()
+
+    private val _isUploadingBanner = MutableStateFlow(false)
+    val isUploadingBanner: StateFlow<Boolean> = _isUploadingBanner.asStateFlow()
+
+    // Error de subida de imagen (evento one-shot: se muestra con Toast y se
+    // limpia con clearUploadError()).
+    private val _uploadError = MutableStateFlow<String?>(null)
+    val uploadError: StateFlow<String?> = _uploadError.asStateFlow()
 
     private val _query = MutableStateFlow("")
 
@@ -73,6 +87,64 @@ class HomeViewModel(
 
     fun signOut() {
         authRepository.signOut()
+    }
+
+    // Sube una nueva foto de avatar a Firebase Storage, guarda la URL en el
+    // perfil (avatarUrl + photoUrl para que se propague a amigos/perfiles
+    // públicos) y actualiza el estado local.
+    fun uploadAvatar(uri: Uri) {
+        val uid = authRepository.currentUser()?.uid ?: return
+        viewModelScope.launch {
+            _isUploadingAvatar.value = true
+            _uploadError.value = null
+            runCatching {
+                val url = storageRepository.uploadAvatar(uid, uri)
+                val current = (profileState.value as? ProfileUiState.Success)?.profile
+                    ?: UserProfile(
+                        uid = uid,
+                        displayName = "Usuario",
+                        email = authRepository.currentUser()?.email.orEmpty(),
+                    )
+                val updated = current.copy(avatarUrl = url, photoUrl = url)
+                profileRepository.saveUserProfile(updated)
+                updated
+            }.onSuccess { updated ->
+                _profileState.value = ProfileUiState.Success(updated)
+            }.onFailure { exception ->
+                _uploadError.value = exception.message ?: "No se pudo subir la imagen"
+            }
+            _isUploadingAvatar.value = false
+        }
+    }
+
+    // Sube una nueva imagen de portada (banner) y guarda su URL en el perfil.
+    fun uploadBanner(uri: Uri) {
+        val uid = authRepository.currentUser()?.uid ?: return
+        viewModelScope.launch {
+            _isUploadingBanner.value = true
+            _uploadError.value = null
+            runCatching {
+                val url = storageRepository.uploadBanner(uid, uri)
+                val current = (profileState.value as? ProfileUiState.Success)?.profile
+                    ?: UserProfile(
+                        uid = uid,
+                        displayName = "Usuario",
+                        email = authRepository.currentUser()?.email.orEmpty(),
+                    )
+                val updated = current.copy(bannerUrl = url)
+                profileRepository.saveUserProfile(updated)
+                updated
+            }.onSuccess { updated ->
+                _profileState.value = ProfileUiState.Success(updated)
+            }.onFailure { exception ->
+                _uploadError.value = exception.message ?: "No se pudo subir la imagen"
+            }
+            _isUploadingBanner.value = false
+        }
+    }
+
+    fun clearUploadError() {
+        _uploadError.value = null
     }
 
     private fun observeProfile() {

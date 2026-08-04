@@ -211,10 +211,19 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **Tests**: `YouTubeLinkParserTest` ampliado a 9 casos (extracción múltiple mixta, dedup de duplicados + líneas vacías, IDs limpios, texto sin enlaces). Total 20 tests en verde.
 - Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde.
 
+### Iteración 9 — Subir avatar y portada del perfil (Firebase Storage) (04-08-2026)
+- **Dependencias**: se añade `firebase-storage` (sin versión, gestionado por el BOM 34.16.0) en `gradle/libs.versions.toml` y `app/build.gradle.kts`.
+- **Nuevo `ProfileStorageRepository`**: sube las imágenes a Firebase Storage bajo `profileImages/{uid}/avatar.jpg` y `profileImages/{uid}/banner.jpg` (una carpeta por usuario para poder restringir el acceso por reglas de seguridad) y devuelve la URL de descarga (`putFile().await()` + `downloadUrl().await()`).
+- **`HomeViewModel`**: nuevos StateFlows `isUploadingAvatar`, `isUploadingBanner` y `uploadError` (evento one-shot). `uploadAvatar(uri)`/`uploadBanner(uri)` suben el fichero, guardan la URL en el perfil vía `UserProfileRepository.saveUserProfile` (`avatarUrl` **y** `photoUrl` para que el avatar se propague a amigos/perfiles públicos) y actualizan el estado local de forma optimista. Los fallos se notifican por Toast y `clearUploadError()` limpia el evento.
+- **UI (`HomeScreen`)**: la portada y el avatar son **tocables** para cambiarlos. Usa el **photo picker** `ActivityResultContracts.GetContent()` (sin permisos de lectura en runtime) que abre la galería; `ImageTarget` (Avatar/Banner) recuerda qué imagen se está seleccionando. Durante la subida se muestra un `CircularProgressIndicator` y se deshabilita el toque; sobre la portada aparece un icono de cámara. Content descriptions: "Cambiar portada"/"Cambiar avatar".
+- **Strings**: nuevos `profile_banner_change`, `profile_avatar_change` y `profile_image_upload_error`.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
+
 ## Pendiente / ideas
 - ~~Reproducción automática de la siguiente canción al terminar.~~ **Hecho y validado** (Iteración 6): `onVideoEnded` → `playNextTrack`/`playNextSavedTrack` → `loadVideoById` → siguiente canción, sin flood y sin saturar el main thread.
 - ~~Editar listas (título/descripción, toggle público).~~ **Hecho**.
 - ~~Modo de reproducción secuencial o aleatoria (shuffle).~~ **Hecho** (Iteración 7): selector en el reproductor de las listas con Shuffle (ON/OFF) y Repeat que cicla OFF → ALL → ONE.
 - ~~Botón "Por enlace" con varios enlaces a la vez.~~ **Hecho** (Iteración 8): diálogo multilínea + selector de lista de destino + `extractVideoIds` + `addMultipleTracksByUrls` con escritura agrupada y Toast de confirmación.
-- Subir imagen de avatar/banner/photo (Firebase Storage).
+- ~~Subir imagen de avatar/banner/photo (Firebase Storage).~~ **Hecho** (Iteración 9): `ProfileStorageRepository` (carpeta `profileImages/{uid}`), `HomeViewModel.uploadAvatar`/`uploadBanner` y portada/avatar tocables con photo picker y progreso de subida. Pendiente: definir **reglas de seguridad de Storage** (acceso al propietario).
 - **Reglas de seguridad de Firestore**: revisar y endurecer las reglas (búsqueda de `users`, `friend_requests`, subcolecciones `friends`/`savedCollections`) antes de publicar.
+- **Reglas de seguridad de Firebase Storage**: limitar `profileImages/{uid}/...` a su propietario (auth.uid == uid).

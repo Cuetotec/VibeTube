@@ -287,6 +287,15 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
 - **Nota**: al ser almacenamiento local, avatar/fondo solo se ven en el mismo dispositivo; `photoUrl` con `file:///...` no se renderiza en otros dispositivos (amigos/perfiles públicos). Las imágenes previas subidas a Storage siguen visibles en los perfiles que las referencian.
 
+### Iteración 18 — El reproductor ya no se reinicia al girar el móvil (04-08-2026)
+- **Síntoma**: al girar el dispositivo (cambio de orientación), la actividad se recreaba y el vídeo volvía a empezar desde el principio.
+- **Causa**: el reproductor usa un `WebView` con la API de YouTube (iframe), no ExoPlayer. Por defecto, Android destruye la actividad (y con ella el `WebView` y el estado `remember { PlayerRef() }`) ante un cambio de configuración como la rotación.
+- **Solución en `AndroidManifest.xml`**: en `.MainActivity` (única actividad del proyecto y donde se reproduce el vídeo) se añade
+  `android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"`.
+  Con esto Android **no destruye la actividad** al girar: el `WebView` sobrevive y la reproducción continúa en el segundo exacto en el que estaba (posición + estado playing/paused preservados de forma implícita por el propio reproductor). Compose sigue adaptando el layout al girar vía `LocalConfiguration`, sin recrear la pantalla.
+- Nota: no hace falta `rememberSaveable`/ViewModel para retener la posición porque el reproductor (WebView) no se destruye; si más adelante se quisiera soportar recreaciones forzadas (muerte del proceso, cambio de tema oscuro), habría que guardar `currentTime` y rehacer `seekTo` vía la API de YouTube.
+- Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
+
 ## Pendiente / ideas
 - ~~Reproducción automática de la siguiente canción al terminar.~~ **Hecho y validado** (Iteración 6): `onVideoEnded` → `playNextTrack`/`playNextSavedTrack` → `loadVideoById` → siguiente canción, sin flood y sin saturar el main thread.
 - ~~Editar listas (título/descripción, toggle público).~~ **Hecho**.

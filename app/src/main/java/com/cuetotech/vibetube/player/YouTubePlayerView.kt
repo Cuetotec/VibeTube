@@ -1,12 +1,16 @@
 package com.cuetotech.vibetube.player
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -17,6 +21,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,13 +30,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -85,6 +87,25 @@ private class PlayerRef {
     // por canción aunque el puente JS repita el evento (defensa extra junto a
     // la deduplicación hasEnded del JavaScript).
     var endedHandled: Boolean = false
+}
+
+// Estado de la pantalla completa del reproductor: el WebChromeClient la gestiona
+// a través de onShowCustomView/onHideCustomView, y estas referencias se guardan
+// aquí (y no solo en closures) para poder deshacer el fullscreen desde el
+// BackHandler o al destruirse el composable.
+private class FullscreenHolder {
+    var active: Boolean = false
+    var container: FrameLayout? = null
+    var callback: WebChromeClient.CustomViewCallback? = null
+    var previousRequestedOrientation: Int = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+}
+
+// Resuelve la Activity que contiene la vista, desenrollando posibles
+// ContextWrapper (necesario para gestionar orientación y la barra de sistema).
+private fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 private class JsBridge(
@@ -361,8 +382,6 @@ private fun buildPlayerHtml(videoId: String, muted: Boolean): String {
 @Composable
 fun YouTubePlayerView(
     currentSong: Song?,
-    onAddSong: () -> Unit,
-    showAddSong: Boolean = true,
     onEnded: () -> Unit = {},
     onStateChange: ((Int) -> Unit)? = null,
     playbackTick: Int = 0,
@@ -375,6 +394,29 @@ fun YouTubePlayerView(
     var playerReady by remember { mutableStateOf(false) }
     var playerError by remember { mutableStateOf<Int?>(null) }
     val videoId = currentSong?.youtubeId.orEmpty()
+
+    // Activity contenedora (para orientación y barras de sistema) y estado de
+    // pantalla completa. isFullscreen es estado de Compose para que el
+    // BackHandler y el overlay reaccionen; fullscreen guarda las referencias
+    // que necesita onHideCustomView/la limpieza.
+    val activity = remember { context.findActivity() }
+    val fullscreen = remember { FullscreenHolder() }
+    var isFullscreen by remember { mutableStateOf(false) }
+
+    // Mientras el vídeo está en pantalla completa, el botón Atrás del sistema
+    // debe salir de ella (player.exitFullscreen), no cerrar la Activity. La
+    // salida real la hace el WebChromeClient vía onHideCustomView.
+    BackHandler(enabled = isFullscreen) {
+        Log.d(TAG, "Back en pantalla completa: saliendo vía player.exitFullscreen()")
+        playerRef.view?.post {
+            runCatching {
+                playerRef.view?.evaluateJavascript(
+                    "if (window.player && typeof player.exitFullscreen === 'function') { player.exitFullscreen(); }",
+                    null,
+                )
+            }
+        }
+    }
 
     // Control de bajo nivel que el handoff usa para pausar/reanudar/buscar el
     // WebView y consultar su posición. Cierra sobre playerRef (estable) y
@@ -532,7 +574,69 @@ fun YouTubePlayerView(
                             }
                         }
                     }
-                    webChromeClient = WebChromeClient()
+                    webChromeClient = object : WebChromeClient() {
+                        // El botón de pantalla completa del reproductor de YouTube
+                        // dispara este callback con una vista propia (la superficie
+                        // de vídeo a pantalla completa). Se muestra en un contenedor
+                        // que cubre toda la ventana y se fuerza orientación apaisada.
+                        override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+                            Log.d(TAG, "onShowCustomView: entrando en pantalla completa")
+                            if (fullscreen.active) {
+                                fullscreen.callback?.onCustomViewHidden()
+                            }
+                            fullscreen.active = true
+                            fullscreen.callback = callback
+
+                            val fullscreenContainer = fullscreen.container
+                                ?: FrameLayout(context).also { fullscreen.container = it }
+                            fullscreenContainer.setBackgroundColor(android.graphics.Color.BLACK)
+                            fullscreenContainer.removeAllViews()
+                            fullscreenContainer.addView(
+                                view,
+                                FrameLayout.LayoutParams(
+                                    FrameLayout.LayoutParams.MATCH_PARENT,
+                                    FrameLayout.LayoutParams.MATCH_PARENT,
+                                ),
+                            )
+
+                            // Oculta el reproductor pequeño de fondo para evitar
+                            // doble renderizado mientras dura el fullscreen.
+                            playerRef.container?.visibility = View.GONE
+
+                            activity?.let { current ->
+                                val decorView = current.window.decorView
+                                if (fullscreenContainer.parent == null &&
+                                    decorView is FrameLayout
+                                ) {
+                                    decorView.addView(
+                                        fullscreenContainer,
+                                        FrameLayout.LayoutParams(
+                                            FrameLayout.LayoutParams.MATCH_PARENT,
+                                            FrameLayout.LayoutParams.MATCH_PARENT,
+                                        ),
+                                    )
+                                }
+                                // Se mantienen visibles las barras de sistema en
+                                // pantalla completa: ocultarlas dispara el overlay
+                                // de confirmación del modo inmersivo del sistema,
+                                // que roba el foco del botón Atrás e impide que el
+                                // BackHandler de la app salga del fullscreen.
+                                fullscreen.previousRequestedOrientation =
+                                    current.requestedOrientation
+                                current.requestedOrientation =
+                                    ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                            }
+                            isFullscreen = true
+                        }
+
+                        // Se invoca al salir de pantalla completa (botón, back del
+                        // iframe o player.exitFullscreen). Restaura todo el estado.
+                        override fun onHideCustomView() {
+                            Log.d(TAG, "onHideCustomView: saliendo de pantalla completa")
+                            exitFullscreen(playerRef, fullscreen, activity)
+                            isFullscreen = false
+                        }
+                    }
                     setBackgroundColor(android.graphics.Color.BLACK)
                 }
                 container.addView(
@@ -583,22 +687,6 @@ fun YouTubePlayerView(
                 onOpenInYoutube = { openInYoutube(context, videoId) },
             )
         }
-
-        if (showAddSong) {
-            IconButton(
-                onClick = onAddSong,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .background(Color.Black.copy(alpha = 0.6f), CircleShape),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Add,
-                    contentDescription = stringResource(R.string.player_add_to_playlist),
-                    tint = Color.White,
-                )
-            }
-        }
     }
 
     LaunchedEffect(playerError) {
@@ -616,6 +704,10 @@ fun YouTubePlayerView(
         }
         onDispose {
             Log.d(TAG, "Liberando reproductor con ID: $videoId")
+            // Si el composable se destruye en pleno fullscreen (navegación), se
+            // revierte la orientación/barras y se limpia la vista personalizada.
+            exitFullscreen(playerRef, fullscreen, activity)
+            isFullscreen = false
             disposePlayer(playerRef)
             playerReady = false
         }
@@ -722,6 +814,38 @@ private fun disposePlayer(playerRef: PlayerRef) {
     }
     playerRef.view = null
     playerRef.loadedVideoId = null
+}
+
+// Revierte el estado de pantalla completa (orientación, barras de sistema y
+// contenedor) y avisa al WebChromeClient de que la vista personalizada ya no
+// se usa. Es idempotente: si no hay fullscreen activo no hace nada, por lo que
+// se puede invocar tanto desde onHideCustomView como desde la limpieza.
+private fun exitFullscreen(
+    playerRef: PlayerRef,
+    fullscreen: FullscreenHolder,
+    activity: Activity?,
+) {
+    if (!fullscreen.active) return
+    Log.d(TAG, "exitFullscreen: restaurando orientación y barras de sistema")
+
+    activity?.let { current ->
+        current.requestedOrientation = fullscreen.previousRequestedOrientation
+        fullscreen.container?.let { container ->
+            if (container.parent != null) {
+                (container.parent as? ViewGroup)?.removeView(container)
+            }
+        }
+    }
+
+    fullscreen.container?.removeAllViews()
+    fullscreen.callback?.onCustomViewHidden()
+
+    // Vuelve a mostrar el reproductor pequeño que quedó oculto al entrar.
+    playerRef.container?.visibility = View.VISIBLE
+
+    fullscreen.active = false
+    fullscreen.container = null
+    fullscreen.callback = null
 }
 
 // Aplica/retira el silenciado del player de YouTube vía JS. El guard usa

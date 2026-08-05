@@ -160,7 +160,6 @@ fun PlaylistsScreen(
             onStartPlayback = viewModel::startPlayback,
             onEnded = viewModel::playNextTrack,
             onRemoveTrack = { songId -> viewModel.removeTrack(selectedPlaylist.id, songId) },
-            onAddSong = viewModel::openAddSongDialog,
             onBrowse = onBrowse,
             modifier = modifier,
         )
@@ -465,7 +464,6 @@ private fun PlaylistDetail(
     onStartPlayback: () -> Unit = {},
     onEnded: () -> Unit = {},
     onRemoveTrack: ((String) -> Unit)? = null,
-    onAddSong: ((Song) -> Unit)? = null,
     onUnsave: (() -> Unit)? = null,
     ownerLabel: String? = null,
     isSaved: Boolean = false,
@@ -533,8 +531,6 @@ private fun PlaylistDetail(
         if (hasValidSong) {
             YouTubePlayerView(
                 currentSong = selectedSong,
-                onAddSong = { onAddSong?.invoke(selectedSong) },
-                showAddSong = !isSaved,
                 onEnded = onEnded,
                 playbackTick = playbackTick,
                 // El WebView solo se silencia cuando el servicio está activo Y la

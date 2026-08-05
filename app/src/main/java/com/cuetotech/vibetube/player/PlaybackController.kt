@@ -101,13 +101,17 @@ class PlaybackController(private val appContext: Context) {
 
     /**
      * Envía toda la lista (en el orden activo del ViewModel) al servicio y
-     * empieza a reproducir desde [startIndex]. Devuelve false si no se pudo
-     * conectar o si ninguna pista pudo resolver su URL de audio.
+     * empieza a reproducir desde [startIndex]. Si [startPlaying] es false, el
+     * servicio queda preparado y pausado (sin pedir foco de audio): se usa en
+     * primer plano, donde el audio lo aporta el WebView y el ExoPlayer no debe
+     * arrebatarle el foco. Devuelve false si no se pudo conectar o si ninguna
+     * pista pudo resolver su URL de audio.
      */
     suspend fun syncPlaylist(
         tracks: List<Song>,
         startIndex: Int,
         repeatMode: Int,
+        startPlaying: Boolean = true,
     ): Boolean {
         val controller = controller() ?: return false
         if (tracks.isEmpty()) {
@@ -152,7 +156,7 @@ class PlaybackController(private val appContext: Context) {
             controller.setMediaItems(items, serviceStart ?: 0, 0L)
             controller.repeatMode = repeatMode
             controller.prepare()
-            controller.play()
+            if (startPlaying) controller.play()
         }
         Log.d(
             TAG,
@@ -170,6 +174,47 @@ class PlaybackController(private val appContext: Context) {
         withContext(Dispatchers.Main) {
             controller.seekTo(serviceIndex, 0L)
             if (play) controller.play()
+        }
+    }
+
+    /** Reanuda la reproducción del servicio (sin cambiar la pista actual). */
+    suspend fun play() {
+        val controller = mediaController ?: return
+        withContext(Dispatchers.Main) {
+            controller.play()
+        }
+    }
+
+    /**
+     * Pausa el servicio conservando la posición y la cola (usado por el handoff
+     * para que el WebView sea la única fuente de audio en primer plano).
+     */
+    suspend fun pause() {
+        val controller = mediaController ?: return
+        withContext(Dispatchers.Main) {
+            controller.pause()
+        }
+    }
+
+    /** Posición de reproducción actual del ExoPlayer (ms); null si no hay servicio conectado. */
+    suspend fun currentPosition(): Long? {
+        val controller = mediaController ?: return null
+        return withContext(Dispatchers.Main) {
+            controller.currentPosition
+        }
+    }
+
+    /**
+     * Reanuda el servicio buscando a [positionMs] dentro de la pista actual si
+     * es una posición válida (> 0); si es null o inválida, solo reanuda.
+     */
+    suspend fun playFromPosition(positionMs: Long?) {
+        val controller = mediaController ?: return
+        withContext(Dispatchers.Main) {
+            if (positionMs != null && positionMs > 0) {
+                controller.seekTo(controller.currentMediaItemIndex, positionMs)
+            }
+            controller.play()
         }
     }
 

@@ -245,6 +245,43 @@ private fun buildPlayerHtml(videoId: String, muted: Boolean): String {
               }
             }
 
+            // Reanuda la reproducción del vídeo (usado por el handoff al volver
+            // al primer plano).
+            function playVideo() {
+              if (window.player && typeof player.playVideo === 'function') {
+                try { player.playVideo(); } catch (e) {}
+              }
+            }
+
+            // Pausa el vídeo (usado por el handoff al pasar a segundo plano).
+            function pauseVideo() {
+              if (window.player && typeof player.pauseVideo === 'function') {
+                try { player.pauseVideo(); } catch (e) {}
+              }
+            }
+
+            // Devuelve la posición actual (segundos) o -1 si no se puede leer
+            // (player aún no listo). getCurrentTime puede devolver no-number o
+            // un valor negativo si el vídeo no está inicializado.
+            function getCurrentTime() {
+              if (window.player && typeof player.getCurrentTime === 'function') {
+                try {
+                  var t = player.getCurrentTime();
+                  return (typeof t === 'number' && t >= 0) ? t : -1;
+                } catch (e) {}
+              }
+              return -1;
+            }
+
+            // Busca a la posición indicada (segundos) y reanuda. El segundo
+            // argumento de seekTo permite saltar dentro de los datos ya
+            // cargados (seek ahedad) para no esperar al rebuffer completo.
+            function seekToPosition(seconds) {
+              if (window.player && typeof player.seekTo === 'function') {
+                try { player.seekTo(seconds, true); player.playVideo(); } catch (e) {}
+              }
+            }
+
             var tag = document.createElement('script');
             tag.src = 'https://www.youtube.com/iframe_api';
             var first = document.getElementsByTagName('script')[0];
@@ -330,6 +367,7 @@ fun YouTubePlayerView(
     onStateChange: ((Int) -> Unit)? = null,
     playbackTick: Int = 0,
     muted: Boolean = false,
+    webPlayerControl: WebPlayerControlHandle? = null,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -337,6 +375,90 @@ fun YouTubePlayerView(
     var playerReady by remember { mutableStateOf(false) }
     var playerError by remember { mutableStateOf<Int?>(null) }
     val videoId = currentSong?.youtubeId.orEmpty()
+
+    // Control de bajo nivel que el handoff usa para pausar/reanudar/buscar el
+    // WebView y consultar su posición. Cierra sobre playerRef (estable) y
+    // encola las operaciones en el hilo principal del WebView.
+    val viewControl = remember {
+        object : WebPlayerControl {
+            override fun play() {
+                playerRef.view?.post {
+                    runCatching {
+                        playerRef.view?.evaluateJavascript(
+                            "if (window.player && typeof player.playVideo === 'function') { player.playVideo(); }",
+                            null,
+                        )
+                    }
+                }
+            }
+
+            override fun pause() {
+                playerRef.view?.post {
+                    runCatching {
+                        playerRef.view?.evaluateJavascript(
+                            "if (window.player && typeof player.pauseVideo === 'function') { player.pauseVideo(); }",
+                            null,
+                        )
+                    }
+                }
+            }
+
+            override fun setMuted(muted: Boolean) {
+                playerRef.view?.post {
+                    runCatching {
+                        evaluateMute(playerRef.view, muted)
+                    }
+                }
+            }
+
+            override fun seekTo(positionMs: Long) {
+                val seconds = positionMs / 1000.0
+                playerRef.view?.post {
+                    runCatching {
+                        playerRef.view?.evaluateJavascript(
+                            "if (window.player && typeof player.seekTo === 'function') { seekToPosition($seconds); }",
+                            null,
+                        )
+                    }
+                }
+            }
+
+            override fun currentPosition(onResult: (Long?) -> Unit) {
+                val view = playerRef.view
+                if (view == null) {
+                    onResult(null)
+                    return
+                }
+                view.post {
+                    runCatching {
+                        view.evaluateJavascript("getCurrentTime();") { result ->
+                            val positionMs = result?.toDoubleOrNull()
+                                ?.let { if (it >= 0) (it * 1000).toLong() else null }
+                            onResult(positionMs)
+                        }
+                    }.onFailure {
+                        onResult(null)
+                    }
+                }
+            }
+        }
+    }
+
+    // Registra el control en el handle compartido con el handoff mientras la
+    // vista esté compuesta; al destruirse se des-registra (y se avisa al handoff
+    // para que el servicio reanude si estaba en pausa).
+    DisposableEffect(webPlayerControl) {
+        if (webPlayerControl != null) {
+            webPlayerControl.control = viewControl
+            webPlayerControl.onAttached?.invoke()
+        }
+        onDispose {
+            if (webPlayerControl != null && webPlayerControl.control === viewControl) {
+                webPlayerControl.control = null
+                webPlayerControl.onDetached?.invoke()
+            }
+        }
+    }
 
     // Crea el WebView con el reproductor embebido (el vídeo inicial se carga
     // con autoplay). Se invoca UNA sola vez; nunca se recrea al cambiar de
@@ -390,10 +512,7 @@ fun YouTubePlayerView(
                                     playerRef.view?.post {
                                         runCatching {
                                             Log.d(TAG, "Aplicando mute pendiente en onPlayerReady")
-                                            playerRef.view?.evaluateJavascript(
-                                                "if (window.player && typeof player.mute === 'function') { player.mute(); }",
-                                                null,
-                                            )
+                                            evaluateMute(playerRef.view, true)
                                         }
                                     }
                                 }
@@ -546,14 +665,10 @@ fun YouTubePlayerView(
     LaunchedEffect(muted) {
         playerRef.muted = muted
         if (videoId.isNotBlank() && playerRef.view != null) {
-            val muteCall = if (muted) "mute()" else "unMute()"
             playerRef.view?.post {
                 runCatching {
                     Log.d(TAG, "Aplicando ${if (muted) "mute" else "unMute"} en el WebView")
-                    playerRef.view?.evaluateJavascript(
-                        "if (window.player && typeof player.$muteCall === 'function') { player.$muteCall; }",
-                        null,
-                    )
+                    evaluateMute(playerRef.view, muted)
                 }
             }
         }
@@ -607,6 +722,18 @@ private fun disposePlayer(playerRef: PlayerRef) {
     }
     playerRef.view = null
     playerRef.loadedVideoId = null
+}
+
+// Aplica/retira el silenciado del player de YouTube vía JS. El guard usa
+// `typeof player.mute === 'function'` (SIN paréntesis): comprobar el resultado
+// de player.mute() siempre devolvía "undefined" y el mute no se ejecutaba.
+private fun evaluateMute(view: WebView?, muted: Boolean) {
+    if (view == null) return
+    val method = if (muted) "mute" else "unMute"
+    view.evaluateJavascript(
+        "if (window.player && typeof player.$method === 'function') { player.$method(); }",
+        null,
+    )
 }
 
 // Carga el vídeo directamente sobre el reproductor YA existente, sin recrear el

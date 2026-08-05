@@ -16,6 +16,8 @@ import com.cuetotech.vibetube.data.SavedPlaylist
 import com.cuetotech.vibetube.data.Song
 import com.cuetotech.vibetube.data.YouTubeLinkParser
 import com.cuetotech.vibetube.player.PlaybackController
+import com.cuetotech.vibetube.player.PlaybackHandoff
+import com.cuetotech.vibetube.player.WebPlayerControlHandle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -99,8 +101,22 @@ class PlaylistsViewModel(
     // muestra el vídeo (silenciado mientras el servicio reproduce la pista).
     private val playbackController = PlaybackController(application.applicationContext)
 
+    // Coordinador del handoff entre el WebView (primer plano) y el servicio
+    // (segundo plano): observa pantalla/proceso y conmuta el audio entre ambos.
+    private val playbackHandoff = PlaybackHandoff(
+        appContext = application.applicationContext,
+        playbackController = playbackController,
+        scope = viewModelScope,
+    )
+
     /** true cuando el servicio está reproduciendo la lista actual. */
     val backgroundAudioActive: StateFlow<Boolean> = playbackController.isActive
+
+    /** true cuando la pantalla está encendida y la app en primer plano (controla el handoff). */
+    val isForeground: StateFlow<Boolean> = playbackHandoff.isForeground
+
+    /** Control del reproductor WebView para el handoff (lo registra YouTubePlayerView). */
+    val webPlayerControl: WebPlayerControlHandle = playbackHandoff.webPlayer
 
     // Clave de la "sesión de reproducción" ya sincronizada con el servicio:
     // lista seleccionada + orden activo. Si coincide, un cambio de pista solo
@@ -192,6 +208,7 @@ class PlaylistsViewModel(
     private val pendingTrackAdds = mutableMapOf<String, MutableList<Song>>()
 
     init {
+        playbackHandoff.start()
         observePlaylists()
         observeSavedPlaylists()
     }
@@ -388,6 +405,10 @@ class PlaylistsViewModel(
         if (index < 0) return
         val key = playbackSessionKey(tracks)
         viewModelScope.launch {
+            // En primer plano el audio lo aporta el WebView: el servicio se
+            // prepara pero NO reproduce (startPlaying=false), evitando que el
+            // ExoPlayer arrebate el foco de audio y ponga en pausa el WebView.
+            val startPlaying = !playbackHandoff.isForeground.value
             // Arranca el servicio Media3 (PlaybackService) en cuanto el usuario
             // pulsa reproducir, ANTES de resolver las URLs de audio: si la
             // extracción tardara o fallara, el servicio ya está en marcha y el
@@ -396,14 +417,20 @@ class PlaylistsViewModel(
                 playbackController.ensureConnected()
             }
             if (syncedPlaylistKey == key && playbackController.isActive.value) {
-                playbackController.seekTo(index, play = true)
+                playbackController.seekTo(index, play = startPlaying)
+                playbackHandoff.onPlaybackSynced()
             } else {
                 syncedPlaylistKey = key
                 val synced = playbackController.syncPlaylist(
                     tracks = tracks,
                     startIndex = index,
                     repeatMode = repeatModeToMedia(_repeatMode.value),
+                    startPlaying = startPlaying,
                 )
+                // Aplica la política de audio según el estado de la pantalla:
+                // en primer plano el servicio se pausa (el sonido lo aporta el
+                // WebView); en segundo plano se mantiene/reanuda.
+                playbackHandoff.onPlaybackSynced()
                 if (!synced) {
                     Log.w(TAG, "No se pudo sincronizar la reproducción en segundo plano")
                     Toast.makeText(
@@ -758,6 +785,7 @@ class PlaylistsViewModel(
     }
 
     override fun onCleared() {
+        playbackHandoff.stop()
         playbackController.release()
         super.onCleared()
     }

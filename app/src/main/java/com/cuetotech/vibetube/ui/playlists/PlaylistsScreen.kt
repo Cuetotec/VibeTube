@@ -56,6 +56,7 @@ import com.cuetotech.vibetube.R
 import com.cuetotech.vibetube.data.Playlist
 import com.cuetotech.vibetube.data.SavedPlaylist
 import com.cuetotech.vibetube.data.Song
+import com.cuetotech.vibetube.player.WebPlayerControlHandle
 import com.cuetotech.vibetube.player.YouTubePlayerView
 import com.cuetotech.vibetube.ui.components.SongItem
 
@@ -75,6 +76,8 @@ fun PlaylistsScreen(
     val repeatMode by viewModel.repeatMode.collectAsState()
     val playbackTick by viewModel.playbackTick.collectAsState()
     val backgroundAudioActive by viewModel.backgroundAudioActive.collectAsState()
+    val isForeground by viewModel.isForeground.collectAsState()
+    val webPlayerControl = viewModel.webPlayerControl
 
     val selectedPlaylist = uiState.playlists.find { it.id == selectedPlaylistId }
     val selectedSaved = savedPlaylists.find { it.playlist.id == selectedSavedId }
@@ -127,6 +130,8 @@ fun PlaylistsScreen(
             repeatMode = repeatMode,
             playbackTick = playbackTick,
             backgroundAudioActive = backgroundAudioActive,
+            isForeground = isForeground,
+            webPlayerControl = webPlayerControl,
             onToggleShuffle = viewModel::toggleShuffle,
             onCycleRepeat = viewModel::cycleRepeatMode,
             onBack = viewModel::closeSavedPlaylist,
@@ -146,6 +151,8 @@ fun PlaylistsScreen(
             repeatMode = repeatMode,
             playbackTick = playbackTick,
             backgroundAudioActive = backgroundAudioActive,
+            isForeground = isForeground,
+            webPlayerControl = webPlayerControl,
             onToggleShuffle = viewModel::toggleShuffle,
             onCycleRepeat = viewModel::cycleRepeatMode,
             onBack = viewModel::closePlaylist,
@@ -449,6 +456,8 @@ private fun PlaylistDetail(
     repeatMode: RepeatMode,
     playbackTick: Int,
     backgroundAudioActive: Boolean = false,
+    isForeground: Boolean = true,
+    webPlayerControl: WebPlayerControlHandle? = null,
     onToggleShuffle: () -> Unit,
     onCycleRepeat: () -> Unit,
     onBack: () -> Unit,
@@ -528,7 +537,11 @@ private fun PlaylistDetail(
                 showAddSong = !isSaved,
                 onEnded = onEnded,
                 playbackTick = playbackTick,
-                muted = backgroundAudioActive,
+                // El WebView solo se silencia cuando el servicio está activo Y la
+                // app NO está en primer plano: en primer plano el WebView es la
+                // fuente de audio (el servicio queda en pausa vía el handoff).
+                muted = backgroundAudioActive && !isForeground,
+                webPlayerControl = webPlayerControl,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(220.dp)

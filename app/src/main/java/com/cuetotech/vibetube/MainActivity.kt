@@ -1,6 +1,8 @@
 package com.cuetotech.vibetube
 
+import android.Manifest
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
@@ -8,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -67,6 +70,14 @@ import com.cuetotech.vibetube.ui.theme.VibeTubeTheme
 private const val LOGIN_ERROR_TAG = "LOGIN_ERROR"
 
 class MainActivity : ComponentActivity() {
+
+    // Android 13+: solicita el permiso de notificaciones para que la notificación
+    // multimedia (reproducción en segundo plano) sea visible en el centro de
+    // control y en la pantalla de bloqueo.
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* el resultado no bloquea la reproducción */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         try {
             // Instala la Splash Screen compatible (Android 12+ usa la API del
@@ -74,6 +85,9 @@ class MainActivity : ComponentActivity() {
             // Debe llamarse antes de super.onCreate().
             installSplashScreen()
             super.onCreate(savedInstanceState)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
             enableEdgeToEdge(
                 statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
                 navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),

@@ -74,6 +74,7 @@ fun PlaylistsScreen(
     val isShuffleEnabled by viewModel.isShuffleEnabled.collectAsState()
     val repeatMode by viewModel.repeatMode.collectAsState()
     val playbackTick by viewModel.playbackTick.collectAsState()
+    val backgroundAudioActive by viewModel.backgroundAudioActive.collectAsState()
 
     val selectedPlaylist = uiState.playlists.find { it.id == selectedPlaylistId }
     val selectedSaved = savedPlaylists.find { it.playlist.id == selectedSavedId }
@@ -125,6 +126,7 @@ fun PlaylistsScreen(
             isShuffleEnabled = isShuffleEnabled,
             repeatMode = repeatMode,
             playbackTick = playbackTick,
+            backgroundAudioActive = backgroundAudioActive,
             onToggleShuffle = viewModel::toggleShuffle,
             onCycleRepeat = viewModel::cycleRepeatMode,
             onBack = viewModel::closeSavedPlaylist,
@@ -143,6 +145,7 @@ fun PlaylistsScreen(
             isShuffleEnabled = isShuffleEnabled,
             repeatMode = repeatMode,
             playbackTick = playbackTick,
+            backgroundAudioActive = backgroundAudioActive,
             onToggleShuffle = viewModel::toggleShuffle,
             onCycleRepeat = viewModel::cycleRepeatMode,
             onBack = viewModel::closePlaylist,
@@ -445,6 +448,7 @@ private fun PlaylistDetail(
     isShuffleEnabled: Boolean,
     repeatMode: RepeatMode,
     playbackTick: Int,
+    backgroundAudioActive: Boolean = false,
     onToggleShuffle: () -> Unit,
     onCycleRepeat: () -> Unit,
     onBack: () -> Unit,
@@ -524,6 +528,7 @@ private fun PlaylistDetail(
                 showAddSong = !isSaved,
                 onEnded = onEnded,
                 playbackTick = playbackTick,
+                muted = backgroundAudioActive,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(220.dp)

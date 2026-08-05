@@ -3,6 +3,15 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Reproducción multimedia en segundo plano (pantalla apagada): el servicio
+         en primer plano mantiene viva la app y el audio mientras se reproduce. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Android 13+: necesario para mostrar la notificación multimedia en el
+         centro de control y la pantalla de bloqueo. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:allowBackup="true"
@@ -26,6 +35,21 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Servicio multimedia Media3: aloja el ExoPlayer que reproduce el audio
+             real de YouTube (extraído con NewPipeExtractor) y se mantiene en
+             primer plano para que la música siga sonando con la pantalla apagada
+             o con la app en segundo plano. stopWithTask=false conserva la
+             reproducción aunque el usuario cierre la app desde el menú recientes. -->
+        <service
+            android:name=".player.PlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="false">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
     </application>
 
 </manifest>

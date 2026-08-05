@@ -1,8 +1,10 @@
 package com.cuetotech.vibetube.ui.playlists
 
+import android.app.Application
 import android.util.Log
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.Player
 import com.cuetotech.vibetube.data.AuthRepository
 import com.cuetotech.vibetube.data.Playlist
 import com.cuetotech.vibetube.data.PlaylistRepository
@@ -11,6 +13,7 @@ import com.cuetotech.vibetube.data.SavedCollectionsRepository
 import com.cuetotech.vibetube.data.SavedPlaylist
 import com.cuetotech.vibetube.data.Song
 import com.cuetotech.vibetube.data.YouTubeLinkParser
+import com.cuetotech.vibetube.player.PlaybackController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
@@ -81,10 +84,26 @@ internal fun nextTrack(
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class PlaylistsViewModel(
-    private val authRepository: AuthRepository = AuthRepository(),
-    private val playlistRepository: PlaylistRepository = PlaylistRepository(),
-    private val savedCollectionsRepository: SavedCollectionsRepository = SavedCollectionsRepository(),
-) : ViewModel() {
+    application: Application,
+) : AndroidViewModel(application) {
+
+    private val authRepository = AuthRepository()
+    private val playlistRepository = PlaylistRepository()
+    private val savedCollectionsRepository = SavedCollectionsRepository()
+
+    // Controlador de la reproducción en segundo plano (MediaController conectado
+    // al PlaybackService). El audio real se reproduce en el servicio (ExoPlayer)
+    // para que siga sonando con la pantalla apagada; el reproductor WebView solo
+    // muestra el vídeo (silenciado mientras el servicio reproduce la pista).
+    private val playbackController = PlaybackController(application.applicationContext)
+
+    /** true cuando el servicio está reproduciendo la lista actual. */
+    val backgroundAudioActive: StateFlow<Boolean> = playbackController.isActive
+
+    // Clave de la "sesión de reproducción" ya sincronizada con el servicio:
+    // lista seleccionada + orden activo. Si coincide, un cambio de pista solo
+    // hace seekTo; si cambia, se re-envía la lista completa.
+    private var syncedPlaylistKey: String? = null
 
     private val _uiState = MutableStateFlow(PlaylistsUiState(isLoading = true))
     val uiState: StateFlow<PlaylistsUiState> = _uiState.asStateFlow()
@@ -223,6 +242,7 @@ class PlaylistsViewModel(
     fun selectTrack(songId: String) {
         _selectedTrackId.value = songId
         rebuildShuffleOrder()
+        syncBackgroundPlayback()
     }
 
     fun openSavedPlaylist(savedPlaylistId: String) {
@@ -241,6 +261,7 @@ class PlaylistsViewModel(
     fun selectSavedTrack(songId: String) {
         _selectedSavedTrackId.value = songId
         rebuildShuffleOrder()
+        syncBackgroundPlayback()
     }
 
     // Inicia la reproducción desde el principio de la lista propia seleccionada:
@@ -256,6 +277,7 @@ class PlaylistsViewModel(
         } else {
             _selectedTrackId.value = tracks.first().id
         }
+        syncBackgroundPlayback()
     }
 
     // Versión de startPlayback para listas guardadas.
@@ -270,6 +292,7 @@ class PlaylistsViewModel(
         } else {
             _selectedSavedTrackId.value = tracks.first().id
         }
+        syncBackgroundPlayback()
     }
 
     // Alterna el modo aleatorio. Al activarlo se genera un nuevo orden permutado
@@ -281,6 +304,9 @@ class PlaylistsViewModel(
         } else {
             shuffleOrder = emptyList()
         }
+        // El orden activo cambió: se re-envía la lista al servicio (o se salta a
+        // la pista actual si aún no había sesión sincronizada).
+        syncBackgroundPlayback()
     }
 
     // Cicla el modo de repetición: OFF -> ALL -> ONE -> OFF.
@@ -290,6 +316,8 @@ class PlaylistsViewModel(
             RepeatMode.ALL -> RepeatMode.ONE
             RepeatMode.ONE -> RepeatMode.OFF
         }
+        val mediaRepeat = repeatModeToMedia(_repeatMode.value)
+        viewModelScope.launch { playbackController.setRepeatMode(mediaRepeat) }
     }
 
     // Reconstruye el orden aleatorio sobre las pistas activas (lista propia o
@@ -315,6 +343,60 @@ class PlaylistsViewModel(
             return _savedPlaylists.value.find { it.playlist.id == savedId }?.playlist?.tracks.orEmpty()
         }
         return emptyList()
+    }
+
+    // Pistas activas en el ORDEN en que se deben reproducir: si el shuffle está
+    // activado se usa el orden permutado (shuffleOrder), si no, el orden de la
+    // lista. Este mismo orden es el que se envía al servicio de reproducción en
+    // segundo plano, para que ambos índices coincidan.
+    private fun orderedActiveTracks(): List<Song> {
+        val tracks = activeTracks()
+        if (_isShuffleEnabled.value && shuffleOrder.isNotEmpty()) {
+            val byId = tracks.associateBy { it.id }
+            return shuffleOrder.mapNotNull { byId[it] }
+        }
+        return tracks
+    }
+
+    // Identifica la sesión de reproducción ya sincronizada con el servicio:
+    // lista seleccionada + orden activo. Si no cambia, un cambio de pista solo
+    // requiere un seekTo; si cambia, hay que re-enviar la lista completa.
+    private fun playbackSessionKey(tracks: List<Song>): String {
+        val listId = _selectedPlaylistId.value ?: _selectedSavedId.value ?: return ""
+        return "$listId|" + tracks.joinToString(",") { it.id }
+    }
+
+    private fun repeatModeToMedia(mode: RepeatMode): Int = when (mode) {
+        RepeatMode.OFF -> Player.REPEAT_MODE_OFF
+        RepeatMode.ALL -> Player.REPEAT_MODE_ALL
+        RepeatMode.ONE -> Player.REPEAT_MODE_ONE
+    }
+
+    // Mantiene el servicio de reproducción en segundo plano sincronizado con la
+    // pista activa del ViewModel: si la sesión (lista + orden) ya se sincronizó,
+    // solo se salta a la pista nueva; si no, se envía la lista completa con los
+    // metadatos y se empieza a reproducir desde la pista actual.
+    private fun syncBackgroundPlayback() {
+        val selectedId = when {
+            _selectedPlaylistId.value != null -> _selectedTrackId.value
+            else -> _selectedSavedTrackId.value
+        } ?: return
+        val tracks = orderedActiveTracks()
+        val index = tracks.indexOfFirst { it.id == selectedId }
+        if (index < 0) return
+        val key = playbackSessionKey(tracks)
+        viewModelScope.launch {
+            if (syncedPlaylistKey == key && playbackController.isActive.value) {
+                playbackController.seekTo(index, play = true)
+            } else {
+                syncedPlaylistKey = key
+                playbackController.syncPlaylist(
+                    tracks = tracks,
+                    startIndex = index,
+                    repeatMode = repeatModeToMedia(_repeatMode.value),
+                )
+            }
+        }
     }
 
     // Aplica el resultado de nextTrack sobre la selección activa:
@@ -365,6 +447,7 @@ class PlaylistsViewModel(
         // currentSong es derivado de la selección y se actualiza automáticamente
         // con el objeto de la siguiente canción.
         advanceSelection(nextId, currentId, "playNextTrack") { _selectedTrackId.value = it }
+        syncBackgroundPlayback()
     }
 
     fun playNextSavedTrack() {
@@ -393,6 +476,7 @@ class PlaylistsViewModel(
         advanceSelection(nextId, currentId, "playNextSavedTrack") {
             _selectedSavedTrackId.value = it
         }
+        syncBackgroundPlayback()
     }
 
     fun openEditDialog(playlist: Playlist) {
@@ -654,5 +738,10 @@ class PlaylistsViewModel(
                 }
         }
         combine(flows) { savedList -> savedList.filterNotNull() }
+    }
+
+    override fun onCleared() {
+        playbackController.release()
+        super.onCleared()
     }
 }

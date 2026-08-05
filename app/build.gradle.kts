@@ -41,6 +41,9 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+        // NewPipeExtractor usa java.time (API 26+); con desugaring funciona en
+        // minSdk 24.
+        isCoreLibraryDesugaringEnabled = true
     }
     buildFeatures {
         compose = true
@@ -64,10 +67,25 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(platform(libs.firebase.bom))
-    implementation(libs.firebase.firestore)
+    // protolite-well-known-types (transitivo de Firestore) duplica las clases
+    // com.google.protobuf.* que ya aporta protobuf-javalite 4.35.1 (traído por
+    // NewPipeExtractor). protobuf-javalite es superconjunto, así que se excluye
+    // el artefacto antiguo.
+    implementation(libs.firebase.firestore) {
+        exclude(group = "com.google.firebase", module = "protolite-well-known-types")
+    }
     implementation(libs.firebase.auth)
     implementation(libs.coil.compose)
     implementation(libs.kotlinx.coroutines.play.services)
+    // Reproducción en segundo plano: Media3 (ExoPlayer + MediaSessionService).
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.exoplayer.hls)
+    implementation(libs.androidx.media3.exoplayer.dash)
+    implementation(libs.androidx.media3.session)
+    // Extracción de la URL de audio real de YouTube (NewPipeExtractor).
+    implementation(libs.newpipe.extractor)
+    implementation(libs.okhttp)
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

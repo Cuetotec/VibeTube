@@ -142,8 +142,9 @@ private class JsBridge(
     }
 }
 
-private fun buildPlayerHtml(videoId: String): String {
+private fun buildPlayerHtml(videoId: String, muted: Boolean): String {
     val safeId = videoId.replace("'", "\\'")
+    val mutedJs = if (muted) "true" else "false"
     return """
         <!DOCTYPE html>
         <html>
@@ -174,6 +175,16 @@ private fun buildPlayerHtml(videoId: String): String {
             var readySent = false;
             var hasEnded = false;
             var pendingJsVideoId = null;
+            // muted = true cuando la reproducción en segundo plano (servicio
+            // Media3/ExoPlayer) está activa: el WebView solo muestra el vídeo y
+            // el audio real lo reproduce el servicio.
+            var muted = $mutedJs;
+
+            function applyMute() {
+              if (muted && player) {
+                try { player.mute(); } catch (e) {}
+              }
+            }
 
             // Notifica el final de vídeo (ENDED, state=0) una sola vez por
             // reproducción: la bandera hasEnded evita que el evento llegue en
@@ -218,6 +229,7 @@ private fun buildPlayerHtml(videoId: String): String {
                   // Fuerza la reproducción aunque el WebView bloquee el autoplay
                   // por gestos de usuario.
                   player.playVideo();
+                  applyMute();
                 } catch (e) {}
               } else {
                 pendingJsVideoId = videoId;
@@ -263,6 +275,7 @@ private fun buildPlayerHtml(videoId: String): String {
                     try {
                       player.playVideo();
                     } catch (e) {}
+                    applyMute();
                   },
                   // Cualquier error (100/101/150/152/152-4/153...) activa el
                   // overlay de error directamente, sin reintentar en bucle.
@@ -289,6 +302,7 @@ private fun buildPlayerHtml(videoId: String): String {
                 try {
                   player.loadVideoById(pendingId);
                   player.playVideo();
+                  applyMute();
                 } catch (e) {}
               }
             }
@@ -306,6 +320,7 @@ fun YouTubePlayerView(
     onEnded: () -> Unit = {},
     onStateChange: ((Int) -> Unit)? = null,
     playbackTick: Int = 0,
+    muted: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -390,7 +405,7 @@ fun YouTubePlayerView(
                 webView.clearHistory()
                 webView.loadDataWithBaseURL(
                     PLAYER_ORIGIN,
-                    buildPlayerHtml(newVideoId),
+                    buildPlayerHtml(newVideoId, muted),
                     "text/html",
                     "utf-8",
                     null,
@@ -476,7 +491,7 @@ fun YouTubePlayerView(
             Log.d(TAG, "Video actual cambiado a: $videoId")
             playerRef.view?.let { webView ->
                 if (playerReady) {
-                    loadVideoInPlayer(webView, videoId)
+                    loadVideoInPlayer(webView, videoId, muted)
                 } else {
                     queueVideoInPlayer(webView, videoId)
                 }
@@ -495,7 +510,26 @@ fun YouTubePlayerView(
         ) {
             Log.d(TAG, "Reiniciando canción actual (RepeatMode.ONE): $videoId")
             playerRef.endedHandled = false
-            playerRef.view?.let { webView -> loadVideoInPlayer(webView, videoId) }
+            playerRef.view?.let { webView -> loadVideoInPlayer(webView, videoId, muted) }
+        }
+    }
+
+    // Aplica/retira el silenciado en el reproductor ya creado cuando cambia el
+    // estado de la reproducción en segundo plano: si el servicio Media3 está
+    // reproduciendo el audio real, el WebView solo muestra el vídeo mudo; si no
+    // (p. ej. la extracción del stream falló), el WebView vuelve a dar sonido.
+    LaunchedEffect(muted) {
+        if (videoId.isNotBlank() && playerRef.view != null && playerReady) {
+            val muteCall = if (muted) "mute()" else "unMute()"
+            playerRef.view?.post {
+                runCatching {
+                    Log.d(TAG, "Aplicando ${if (muted) "mute" else "unMute"} en el WebView")
+                    playerRef.view?.evaluateJavascript(
+                        "if (window.player && typeof player.$muteCall === 'function') { player.$muteCall; }",
+                        null,
+                    )
+                }
+            }
         }
     }
 }
@@ -518,13 +552,14 @@ private fun disposePlayer(playerRef: PlayerRef) {
 // Carga el vídeo directamente sobre el reproductor YA existente, sin recrear el
 // WebView: ejecuta SOLO JavaScript (player.loadVideoById) sobre el player listo,
 // con una comprobación defensiva por si el objeto player aún no está expuesto.
-private fun loadVideoInPlayer(webView: WebView, videoId: String) {
+private fun loadVideoInPlayer(webView: WebView, videoId: String, muted: Boolean) {
     val safeId = videoId.replace("'", "\\'")
+    val muteJs = if (muted) "player.mute();" else ""
     webView.post {
         runCatching {
             Log.d(TAG, "loadVideoInPlayer (player.loadVideoById + playVideo): $videoId")
             webView.evaluateJavascript(
-                "if (window.player && typeof player.loadVideoById === 'function') { player.loadVideoById('$safeId'); player.playVideo(); }",
+                "if (window.player && typeof player.loadVideoById === 'function') { player.loadVideoById('$safeId'); player.playVideo(); $muteJs }",
                 null,
             )
         }.onFailure { exception ->

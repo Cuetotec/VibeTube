@@ -1,5 +1,6 @@
 package com.cuetotech.vibetube.ui.home
 
+import android.app.Application
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -64,7 +65,9 @@ import com.cuetotech.vibetube.ui.playlists.PlaylistsViewModel
 @Composable
 fun HomeScreen(
     modifier: Modifier = Modifier,
-    viewModel: HomeViewModel = viewModel(),
+    viewModel: HomeViewModel = viewModel(
+        factory = HomeViewModel.factory(LocalContext.current.applicationContext as Application),
+    ),
     playlistsViewModel: PlaylistsViewModel = viewModel(),
 ) {
     val profileState by viewModel.profileState.collectAsState()

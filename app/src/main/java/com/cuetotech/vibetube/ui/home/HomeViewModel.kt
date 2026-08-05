@@ -1,8 +1,11 @@
 package com.cuetotech.vibetube.ui.home
 
 import android.app.Application
-import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import android.net.Uri
 import com.cuetotech.vibetube.data.AuthRepository
 import com.cuetotech.vibetube.data.ProfileMediaRepository
@@ -40,12 +43,30 @@ data class SearchUiState(
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class HomeViewModel(
-    application: Application,
     private val authRepository: AuthRepository = AuthRepository(),
     private val profileRepository: UserProfileRepository = UserProfileRepository(),
     private val searchRepository: YouTubeSearchRepository = YouTubeSearchRepository(),
-    private val mediaRepository: ProfileMediaRepository = ProfileMediaRepository(application),
-) : AndroidViewModel(application) {
+    private val mediaRepository: ProfileMediaRepository,
+) : ViewModel() {
+
+    // Fábrica explícita: AndroidViewModelFactory NO puede instanciar este
+    // ViewModel porque su constructor no tiene un solo parámetro Application
+    // (Kotlin solo genera el constructor reducido público cuando TODOS los
+    // parámetros tienen valor por defecto). Se pasa manualmente al crear el
+    // ViewModel en la pantalla: viewModel(factory = HomeViewModel.factory(app)).
+    companion object {
+        fun factory(application: Application): ViewModelProvider.Factory =
+            viewModelFactory {
+                initializer {
+                    HomeViewModel(
+                        authRepository = AuthRepository(),
+                        profileRepository = UserProfileRepository(),
+                        searchRepository = YouTubeSearchRepository(),
+                        mediaRepository = ProfileMediaRepository(application),
+                    )
+                }
+            }
+    }
 
     private val _profileState = MutableStateFlow<ProfileUiState>(ProfileUiState.Loading)
     val profileState: StateFlow<ProfileUiState> = _profileState.asStateFlow()
@@ -173,13 +194,29 @@ class HomeViewModel(
         }
     }
 
+    // Carga el perfil del usuario desde Firestore de forma defensiva: si la
+    // lectura falla (permisos, red o campos de imagen avatarUrl/bannerUrl
+    // ausentes o inválidos), se continúa con un perfil por defecto SIN imágenes,
+    // para que el inicio de sesión complete siempre el flujo hacia la pantalla
+    // principal. Las rutas locales "file://..." que ya no existen en disco se
+    // descartan (null) para que la UI muestre la imagen por defecto. La
+    // escritura del perfil por defecto también es tolerante a fallos.
     private fun profileFlow(uid: String): Flow<UserProfile> = flow {
-        val existing = profileRepository.getUserProfile(uid)
-        val profile = existing ?: UserProfile(
-            uid = uid,
-            displayName = "Usuario",
-            email = authRepository.currentUser()?.email ?: "",
-        ).also { profileRepository.saveUserProfile(it) }
+        val existing = runCatching { profileRepository.getUserProfile(uid) }.getOrNull()
+        val profile = existing
+            ?.copy(
+                avatarUrl = mediaRepository.existingLocalImage(existing.avatarUrl),
+                bannerUrl = mediaRepository.existingLocalImage(existing.bannerUrl),
+                photoUrl = mediaRepository.existingLocalImage(existing.photoUrl),
+            )
+            ?: UserProfile(
+                uid = uid,
+                displayName = authRepository.currentUser()?.displayName ?: "Usuario",
+                email = authRepository.currentUser()?.email ?: "",
+            )
+        if (existing == null) {
+            runCatching { profileRepository.saveUserProfile(profile) }
+        }
         emit(profile)
     }
 

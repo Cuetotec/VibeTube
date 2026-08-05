@@ -1,5 +1,6 @@
 package com.cuetotech.vibetube.ui.auth
 
+import android.util.Log
 import android.util.Patterns
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -11,6 +12,7 @@ import com.google.firebase.auth.FirebaseAuthInvalidUserException
 import com.google.firebase.auth.FirebaseAuthUserCollisionException
 import com.google.firebase.auth.FirebaseAuthWeakPasswordException
 import com.google.firebase.auth.FirebaseUser
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +20,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+private const val LOGIN_ERROR_TAG = "LOGIN_ERROR"
 
 data class AuthFormState(
     val isLoginMode: Boolean = true,
@@ -76,7 +80,7 @@ class AuthViewModel(
 
         viewModelScope.launch {
             _formState.update { it.copy(isLoading = true, error = null) }
-            runCatching {
+            try {
                 if (state.isLoginMode) {
                     authRepository.signIn(email, password)
                 } else {
@@ -89,7 +93,14 @@ class AuthViewModel(
                         ),
                     )
                 }
-            }.onFailure { exception ->
+                // Sesión iniciada (o cuenta creada): el StateFlow user pasa a
+                // no-null y MainScreen muestra la pantalla principal. isLoading
+                // se resetea para no dejar el botón bloqueado.
+                _formState.update { it.copy(isLoading = false) }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                Log.e(LOGIN_ERROR_TAG, "Error en login", exception)
                 _formState.update { it.copy(isLoading = false, error = exception.toUserMessage()) }
             }
         }

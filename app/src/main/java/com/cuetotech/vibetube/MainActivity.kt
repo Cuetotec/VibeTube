@@ -2,6 +2,7 @@ package com.cuetotech.vibetube
 
 import android.graphics.Color
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -9,6 +10,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -62,22 +64,55 @@ import com.cuetotech.vibetube.ui.playlists.PlaylistsViewModel
 import com.cuetotech.vibetube.ui.playlists.PlaylistsScreen
 import com.cuetotech.vibetube.ui.theme.VibeTubeTheme
 
+private const val LOGIN_ERROR_TAG = "LOGIN_ERROR"
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Instala la Splash Screen compatible (Android 12+ usa la API del
-        // sistema; en versiones anteriores se emula con Theme.SplashScreen).
-        // Debe llamarse antes de super.onCreate().
-        installSplashScreen()
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-        )
-        setContent {
-            VibeTubeTheme {
-                MainScreen()
+        try {
+            // Instala la Splash Screen compatible (Android 12+ usa la API del
+            // sistema; en versiones anteriores se emula con Theme.SplashScreen).
+            // Debe llamarse antes de super.onCreate().
+            installSplashScreen()
+            super.onCreate(savedInstanceState)
+            enableEdgeToEdge(
+                statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+                navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            )
+            // Navegación inicial (Login <-> pantalla principal) protegida: si
+            // cualquier excepción escapa durante la composición inicial, se
+            // registra en logcat (LOGIN_ERROR) y se muestra una pantalla de
+            // error en vez de cerrar la app.
+            setContent {
+                VibeTubeTheme {
+                    MainScreen()
+                }
+            }
+        } catch (exception: Exception) {
+            Log.e(LOGIN_ERROR_TAG, "Error en navegación inicial", exception)
+            runCatching {
+                setContent {
+                    VibeTubeTheme {
+                        StartupErrorFallback()
+                    }
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun StartupErrorFallback() {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = stringResource(R.string.startup_error_message),
+            style = MaterialTheme.typography.titleMedium,
+        )
     }
 }
 

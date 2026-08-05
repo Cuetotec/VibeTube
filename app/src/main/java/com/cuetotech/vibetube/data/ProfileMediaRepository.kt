@@ -40,4 +40,17 @@ class ProfileMediaRepository(
             file.delete()
         }
     }
+
+    // Devuelve la URL solo si sigue siendo válida para la UI:
+    //  - URL remota (https:// de la antigua Firebase Storage): se conserva.
+    //  - Ruta local (file://...) cuyo archivo ya no existe en disco (app
+    //    reinstalada, archivo borrado): se devuelve null para que la UI
+    //    muestre la imagen por defecto (iniciales) sin romper el flujo.
+    fun existingLocalImage(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return url
+        if (uri.scheme != "file") return url
+        val path = uri.path ?: return null
+        return if (File(path).exists()) url else null
+    }
 }

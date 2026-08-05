@@ -21,7 +21,6 @@
     
 ---
 
-
 ## 🛠️ Arquitectura y Tecnologías Usadas
 
 - **Lenguaje:** Kotlin 100%
@@ -32,27 +31,6 @@
 - **Cliente HTTP:** OkHttpClient con gestión persistente de cookies (`CookieJar`) y soporte para headers de consentimiento (`SOCS`)
 - **Asincronía & Concurrencia:** Kotlin Coroutines (`StateFlow`, `SharedFlow`, `Mutex`, `Semaphore`)
 - **Gestión de Ciclo de Vida:** LifecycleObserver, BroadcastReceiver de estado de pantalla (`ACTION_SCREEN_OFF` / `ACTION_SCREEN_ON`)
-
----
-
-## 📐 Arquitectura del Sistema (Flujo de Conmutación)
-[ APP EN PRIMER PLANO ]
-             (Pantalla encendida y UI visible)
-                            │
-┌───────────────────────────┴───────────────────────────┐
-▼                                                       ▼
-WebView: Reproduciendo Vídeo                   ExoPlayer: Pausado
-(Audio ON / Sincronizado)                      (En espera)
-│                                                       ▲
-└───────────────────────────┬───────────────────────────┘
-│
-(Usuario bloquea la pantalla)
-│
-┌───────────────────────────┴───────────────────────────┐
-▼                                                       ▼
-WebView: Pausado                               ExoPlayer: Reproduciendo
-(Ahorro de recursos)                           (Audio ON desde exacto timestamp)
-[ APP EN SEGUNDO PLANO ]
 
 ---
 

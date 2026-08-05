@@ -2,9 +2,11 @@ package com.cuetotech.vibetube.ui.playlists
 
 import android.app.Application
 import android.util.Log
+import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.Player
+import com.cuetotech.vibetube.R
 import com.cuetotech.vibetube.data.AuthRepository
 import com.cuetotech.vibetube.data.Playlist
 import com.cuetotech.vibetube.data.PlaylistRepository
@@ -386,15 +388,30 @@ class PlaylistsViewModel(
         if (index < 0) return
         val key = playbackSessionKey(tracks)
         viewModelScope.launch {
+            // Arranca el servicio Media3 (PlaybackService) en cuanto el usuario
+            // pulsa reproducir, ANTES de resolver las URLs de audio: si la
+            // extracción tardara o fallara, el servicio ya está en marcha y el
+            // MediaController conectado.
+            if (!playbackController.isActive.value) {
+                playbackController.ensureConnected()
+            }
             if (syncedPlaylistKey == key && playbackController.isActive.value) {
                 playbackController.seekTo(index, play = true)
             } else {
                 syncedPlaylistKey = key
-                playbackController.syncPlaylist(
+                val synced = playbackController.syncPlaylist(
                     tracks = tracks,
                     startIndex = index,
                     repeatMode = repeatModeToMedia(_repeatMode.value),
                 )
+                if (!synced) {
+                    Log.w(TAG, "No se pudo sincronizar la reproducción en segundo plano")
+                    Toast.makeText(
+                        getApplication<Application>(),
+                        R.string.playback_audio_extraction_failed,
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
             }
         }
     }

@@ -39,6 +39,7 @@
     <string name="player_add_to_playlist">Añadir a una lista</string>
     <string name="player_error_message">Este vídeo no se puede reproducir dentro de la app.</string>
     <string name="player_error_open_in_youtube">Abrir en YouTube</string>
+    <string name="playback_audio_extraction_failed">No se pudo extraer el audio de YouTube: se reproduce solo dentro de la app, sin segundo plano.</string>
     <string name="player_shuffle_on">Aleatorio activado</string>
     <string name="player_shuffle_off">Aleatorio desactivado</string>
     <string name="player_repeat_off">Repetir desactivado</string>

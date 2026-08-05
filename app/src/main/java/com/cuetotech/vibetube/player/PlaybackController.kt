@@ -13,17 +13,13 @@ import androidx.media3.session.SessionToken
 import com.cuetotech.vibetube.data.Song
 import com.cuetotech.vibetube.data.YouTubeStreamResolver
 import com.google.common.util.concurrent.ListenableFuture
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executor
@@ -31,9 +27,9 @@ import kotlin.coroutines.resume
 
 private const val TAG = "VibeTubePlayback"
 
-// Semáforo para no lanzar demasiadas extracciones de NewPipeExtractor a la vez
-// (YouTube puede limitar si se disparan en paralelo).
-private const val MAX_CONCURRENT_EXTRACTIONS = 4
+// Tiempo máximo de espera para que el MediaController conecte con el
+// PlaybackService; pasado este tiempo se libera el future y se puede reintentar.
+private const val CONNECT_TIMEOUT_MS = 15_000L
 
 private const val ARTWORK_URL_TEMPLATE = "https://i.ytimg.com/vi/%s/hqdefault.jpg"
 
@@ -54,7 +50,11 @@ private const val ARTWORK_URL_TEMPLATE = "https://i.ytimg.com/vi/%s/hqdefault.jp
 class PlaybackController(private val appContext: Context) {
 
     private val mainExecutor: Executor = ContextCompat.getMainExecutor(appContext)
-    private val resolutionSemaphore = Semaphore(MAX_CONCURRENT_EXTRACTIONS)
+
+    // Serializa las conexiones al PlaybackService: solo una corrutina espera a
+    // la vez, de modo que liberar el future en awaitController (cancelación o
+    // timeout) no rompe a otra corrutina que estuviera esperando el mismo.
+    private val connectMutex = Mutex()
 
     private var connectFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
@@ -67,8 +67,9 @@ class PlaybackController(private val appContext: Context) {
     /** true cuando el servicio está conectado y reproduciendo la lista actual. */
     val isActive: StateFlow<Boolean> = _isActive.asStateFlow()
 
-    private suspend fun controller(): MediaController? {
-        mediaController?.let { return it }
+    private suspend fun controller(): MediaController? = connectMutex.withLock {
+        mediaController?.let { return@withLock it }
+        Log.d(TAG, "Conectando MediaController al PlaybackService...")
         val future = connectFuture ?: MediaController.Builder(
             appContext,
             SessionToken(appContext, ComponentName(appContext, PlaybackService::class.java)),
@@ -77,8 +78,25 @@ class PlaybackController(private val appContext: Context) {
         if (controller != null) {
             mediaController = controller
             _isActive.value = true
+            Log.d(TAG, "MediaController conectado al PlaybackService")
+        } else {
+            Log.e(TAG, "No se pudo conectar el MediaController al PlaybackService")
+            // Permite reintentar con un future nuevo la próxima vez (el anterior
+            // se liberó por timeout o cancelación, o falló al conectar).
+            connectFuture = null
         }
-        return controller
+        controller
+    }
+
+    /**
+     * Fuerza la conexión con el [PlaybackService] (y, con ello, el arranque del
+     * servicio Media3) tan pronto como el usuario pulsa en reproducir, ANTES de
+     * resolver las URLs de audio. Devuelve true si el servicio quedó conectado.
+     */
+    suspend fun ensureConnected(): Boolean {
+        val connected = controller() != null
+        Log.d(TAG, "ensureConnected: servicio ${if (connected) "conectado" else "NO disponible"}")
+        return connected
     }
 
     /**
@@ -97,9 +115,14 @@ class PlaybackController(private val appContext: Context) {
             return false
         }
 
-        // Extrae las URLs de audio en paralelo (con límite de concurrencia).
-        val urls = resolveAudioUrls(tracks)
+        // Extrae las URLs de audio en paralelo (el resolver limita la
+        // concurrencia y aísla el fallo de cada canción).
+        val urls = YouTubeStreamResolver.resolveAudioUrls(tracks.map { it.youtubeId })
         val playable = tracks.indices.filter { urls[it] != null }
+        Log.d(
+            TAG,
+            "syncPlaylist: ${playable.size}/${tracks.size} pistas con audio resuelto",
+        )
         if (playable.isEmpty()) {
             Log.w(TAG, "syncPlaylist: ninguna pista pudo resolver su audio")
             _isActive.value = false
@@ -113,10 +136,20 @@ class PlaybackController(private val appContext: Context) {
         val items = playable.map { vmIndex ->
             buildMediaItem(tracks[vmIndex], urls[vmIndex]!!)
         }
-        val serviceStart = vmToServiceIndex[startIndex] ?: 0
+
+        // Si la pista que se quería reproducir no resolvió audio, se arranca
+        // desde la primera pista válida de la lista (en orden).
+        val serviceStart = vmToServiceIndex[startIndex]
+        if (serviceStart == null) {
+            Log.w(
+                TAG,
+                "syncPlaylist: la pista inicial $startIndex no resolvió audio; " +
+                    "reproduciendo desde la primera pista válida (${playable.first()})",
+            )
+        }
 
         withContext(Dispatchers.Main) {
-            controller.setMediaItems(items, serviceStart, 0L)
+            controller.setMediaItems(items, serviceStart ?: 0, 0L)
             controller.repeatMode = repeatMode
             controller.prepare()
             controller.play()
@@ -167,23 +200,6 @@ class PlaybackController(private val appContext: Context) {
         _isActive.value = false
     }
 
-    private suspend fun resolveAudioUrls(tracks: List<Song>): Map<Int, String?> =
-        withContext(Dispatchers.IO) {
-            coroutineScope {
-                tracks.indices.map { vmIndex ->
-                    async {
-                        resolutionSemaphore.withPermit {
-                            vmIndex to withTimeoutOrNull(20_000) {
-                                runCatching {
-                                    YouTubeStreamResolver.resolveAudioUrl(tracks[vmIndex].youtubeId)
-                                }.getOrNull()
-                            }
-                        }
-                    }
-                }.awaitAll().toMap()
-            }
-        }
-
     private fun buildMediaItem(song: Song, url: String): MediaItem =
         MediaItem.Builder()
             .setMediaId(song.id)
@@ -198,12 +214,31 @@ class PlaybackController(private val appContext: Context) {
             .build()
 
     private suspend fun awaitController(future: ListenableFuture<MediaController>): MediaController? =
-        suspendCancellableCoroutine { continuation ->
-            future.addListener(
-                {
-                    continuation.resume(runCatching { future.get() }.getOrNull())
-                },
-                mainExecutor,
-            )
+        withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                // Si la corrutina se cancela (navegación, timeout, ViewModel
+                // destruido), se libera el future para no dejar la conexión
+                // huérfana esperando. Solo hay un awaiter a la vez (connectMutex).
+                continuation.invokeOnCancellation {
+                    MediaController.releaseFuture(future)
+                }
+                future.addListener(
+                    {
+                        val controller = try {
+                            future.get()
+                        } catch (exception: Exception) {
+                            Log.e(TAG, "Fallo al conectar el MediaController", exception)
+                            null
+                        }
+                        if (controller == null) {
+                            Log.e(TAG, "El future del MediaController no devolvió un controlador")
+                        }
+                        // Si la corrutina ya fue cancelada (timeout), resume() es
+                        // un no-op y el future ya se liberó en invokeOnCancellation.
+                        continuation.resume(controller)
+                    },
+                    mainExecutor,
+                )
+            }
         }
 }

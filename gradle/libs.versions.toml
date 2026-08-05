@@ -19,6 +19,7 @@ coroutinesPlayServices = "1.10.2"
 materialIconsCore = "1.7.8"
 media3 = "1.10.1"
 newpipeExtractor = "v0.26.4"
+protobufJavalite = "4.35.1"
 okhttp = "5.4.0"
 desugarJdkLibs = "2.1.4"
 
@@ -53,6 +54,7 @@ androidx-media3-exoplayer-hls = { group = "androidx.media3", name = "media3-exop
 androidx-media3-exoplayer-dash = { group = "androidx.media3", name = "media3-exoplayer-dash", version.ref = "media3" }
 androidx-media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3" }
 newpipe-extractor = { group = "com.github.teamnewpipe", name = "NewPipeExtractor", version.ref = "newpipeExtractor" }
+protobuf-javalite = { group = "com.google.protobuf", name = "protobuf-javalite", version.ref = "protobufJavalite" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 desugar-jdk-libs = { group = "com.android.tools", name = "desugar_jdk_libs", version.ref = "desugarJdkLibs" }
 

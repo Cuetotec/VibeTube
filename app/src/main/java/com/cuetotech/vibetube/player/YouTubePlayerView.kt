@@ -40,6 +40,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,6 +49,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.cuetotech.vibetube.R
 import com.cuetotech.vibetube.data.Song
 
@@ -71,6 +75,11 @@ private class PlayerRef {
     var container: ViewGroup? = null
     var view: WebView? = null
     var loadedVideoId: String? = null
+
+    // Último estado de mute solicitado por la UI. Se guarda aquí (y no solo en
+    // el estado de composición) para poder reaplicarlo en onPlayerReady si el
+    // player aún no estaba listo cuando el estado cambió.
+    var muted: Boolean = false
 
     // Bandera de control en Kotlin: evita procesar onVideoEnded más de una vez
     // por canción aunque el puente JS repita el evento (defensa extra junto a
@@ -372,6 +381,22 @@ fun YouTubePlayerView(
                             readyHandler = {
                                 playerReady = true
                                 Log.d(TAG, "onPlayerReady (videoId=$newVideoId)")
+                                // Si el mute se solicitó antes de que el player
+                                // estuviera listo (LaunchedEffect(muted) no pudo
+                                // aplicarlo), se reaplica aquí al estar listo:
+                                // el WebView no debe sonar por su cuenta mientras
+                                // el PlaybackService reproduce el audio real.
+                                if (playerRef.muted) {
+                                    playerRef.view?.post {
+                                        runCatching {
+                                            Log.d(TAG, "Aplicando mute pendiente en onPlayerReady")
+                                            playerRef.view?.evaluateJavascript(
+                                                "if (window.player && typeof player.mute === 'function') { player.mute(); }",
+                                                null,
+                                            )
+                                        }
+                                    }
+                                }
                             },
                         ),
                         JS_BRIDGE_NAME,
@@ -519,7 +544,8 @@ fun YouTubePlayerView(
     // reproduciendo el audio real, el WebView solo muestra el vídeo mudo; si no
     // (p. ej. la extracción del stream falló), el WebView vuelve a dar sonido.
     LaunchedEffect(muted) {
-        if (videoId.isNotBlank() && playerRef.view != null && playerReady) {
+        playerRef.muted = muted
+        if (videoId.isNotBlank() && playerRef.view != null) {
             val muteCall = if (muted) "mute()" else "unMute()"
             playerRef.view?.post {
                 runCatching {
@@ -531,6 +557,40 @@ fun YouTubePlayerView(
                 }
             }
         }
+    }
+
+    // Guard de ciclo de vida: al pausar/detener la Activity (p. ej. al bloquear
+    // la pantalla) el reproductor WebView NO se pausa ni se detiene, porque el
+    // audio real en segundo plano lo reproduce el PlaybackService (Media3) y
+    // pausar aquí cortaría la música. Al volver al primer plano, si el audio lo
+    // sigue gestionando el WebView (no está mute), se reanuda el vídeo por si el
+    // sistema lo pausó mientras la pantalla estuvo oculta.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val currentMuted by rememberUpdatedState(muted)
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    if (!currentMuted && playerRef.view != null) {
+                        playerRef.view?.post {
+                            runCatching {
+                                Log.d(TAG, "ON_RESUME: reanudando WebView (audio gestionado por la app)")
+                                playerRef.view?.evaluateJavascript(
+                                    "if (window.player && typeof player.playVideo === 'function') { player.playVideo(); }",
+                                    null,
+                                )
+                            }
+                        }
+                    }
+                }
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                    Log.d(TAG, "Lifecycle $event: el WebView NO se pausa ni se detiene (audio delegado al servicio)")
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 }
 

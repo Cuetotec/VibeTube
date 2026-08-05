@@ -67,10 +67,13 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(platform(libs.firebase.bom))
-    // protolite-well-known-types (transitivo de Firestore) duplica las clases
-    // com.google.protobuf.* que ya aporta protobuf-javalite 4.35.1 (traído por
-    // NewPipeExtractor). protobuf-javalite es superconjunto, así que se excluye
-    // el artefacto antiguo.
+    // protolite-well-known-types (transitivo de Firestore) incluye copias de
+    // com.google.protobuf.* que DUPLICAN protobuf-javalite 4.35.1 (traído por
+    // NewPipeExtractor) y rompe checkDebugDuplicateClasses. Se excluye y, a
+    // cambio, se aportan manualmente los well-known types de googleapis que
+    // Firestore necesita y que protobuf-javalite NO incluye (com.google.type.
+    // LatLng y com.google.rpc.Status), generados con protoc 35.1 (lite) en
+    // app/src/main/java/com/google/{type,rpc}.
     implementation(libs.firebase.firestore) {
         exclude(group = "com.google.firebase", module = "protolite-well-known-types")
     }
@@ -84,6 +87,10 @@ dependencies {
     implementation(libs.androidx.media3.session)
     // Extracción de la URL de audio real de YouTube (NewPipeExtractor).
     implementation(libs.newpipe.extractor)
+    // NewPipe solo aporta protobuf-javalite en runtime; se declara explícito
+    // para que las clases com.google.type.LatLng y com.google.rpc.Status
+    // (generadas con protoc 35.1/lite) compilen en el classpath de la app.
+    implementation(libs.protobuf.javalite)
     implementation(libs.okhttp)
     coreLibraryDesugaring(libs.desugar.jdk.libs)
     testImplementation(libs.junit)

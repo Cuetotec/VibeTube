@@ -14,10 +14,12 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
+import androidx.media3.session.MediaSession.MediaItemsWithStartPosition
 import androidx.media3.session.MediaSessionService
 import com.cuetotech.vibetube.data.AuthRepository
 import com.cuetotech.vibetube.data.PlaylistRepository
 import com.cuetotech.vibetube.data.Song
+import com.cuetotech.vibetube.data.YouTubeStreamResolver
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
@@ -25,12 +27,11 @@ import com.google.common.util.concurrent.SettableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.schabi.newpipe.extractor.ServiceList
-import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 
 
 private const val STREAM_USER_AGENT =
@@ -38,6 +39,14 @@ private const val STREAM_USER_AGENT =
         "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
 private const val ROOT_ID = "root_vibetube"
+
+// Separador del mediaId de cada canción: "playlistId:youtubeId". Android Auto
+// envía ese mediaId al pulsar la canción, y así sabemos a qué lista pertenece
+// para cargarla completa en la cola (salto de pista en el volante).
+private const val MEDIA_ID_SEPARATOR = ":"
+
+// Carátula por defecto de una canción (miniatura hqdefault de YouTube).
+private const val THUMBNAIL_BASE_URL = "https://i.ytimg.com/vi"
 
 // Tag de depuración del media browser (Android Auto).
 private const val TAG_MEDIA = "VibeTubeMedia"
@@ -48,12 +57,23 @@ private const val TAG_MEDIA = "VibeTubeMedia"
 private const val AUTH_TIMEOUT_MS = 2_000L
 private const val AUTH_RETRY_DELAY_MS = 100L
 
+// Tiempo máximo de una extracción de audio (NewPipe). Si no se resuelve a
+// tiempo se devuelve null y la cola se monta igualmente (la resolución
+// perezosa en segundo plano puede reintentarla).
+private const val AUDIO_EXTRACTION_TIMEOUT_MS = 10_000L
+
 class PlaybackService : MediaLibraryService() {
 
     private var mediaLibrarySession: MediaLibrarySession? = null
 
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
+
+    // Scope desacoplado para las extracciones de audio: al abandonar una
+    // extracción por timeout, esta sigue en segundo plano sin bloquear el
+    // montaje de la cola (fetchPage() es una llamada de red bloqueante que
+    // withContext no puede interrumpir a tiempo).
+    private val extractorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Repositorios reales de la app: las listas que ve Android Auto son las del
     // usuario autenticado en Firestore (no datos estáticos). Se construyen con
@@ -94,6 +114,10 @@ class PlaybackService : MediaLibraryService() {
         )
         player.setHandleAudioBecomingNoisy(true)
 
+        // Reproducción automática en cuanto la sesión reciba una cola: al
+        // pulsar una canción en Android Auto, el reproductor arranca solo.
+        player.playWhenReady = true
+
         // Inicialización de la sesión multimedia para android auto
         mediaLibrarySession = MediaLibrarySession.Builder(this, player, LibraryCallback())
             .build()
@@ -104,6 +128,7 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onDestroy() {
         serviceJob.cancel()
+        extractorScope.cancel()
         mediaLibrarySession?.run {
             player.release()
             release()
@@ -112,22 +137,18 @@ class PlaybackService : MediaLibraryService() {
         super.onDestroy()
     }
 
-    private suspend fun getYoutubeAudioUrl(videoId: String): String? = withContext(Dispatchers.IO) {
-
-        try {
-            val url = "https://www.youtube.com/watch?v=$videoId"
-            val extractor = ServiceList.YouTube.getStreamExtractor(url) as YoutubeStreamExtractor
-            extractor.fetchPage()
-
-            val audioStreams = extractor.audioStreams
-            val bestAudio = audioStreams.maxByOrNull { it.averageBitrate }
-
-            bestAudio?.content
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
+    private suspend fun getYoutubeAudioUrl(videoId: String): String? =
+        // Timeout real: se espera como máximo AUDIO_EXTRACTION_TIMEOUT_MS a la
+        // extracción. Si se agota, se devuelve null y la cola se monta igualmente
+        // (la extracción sigue en extractorScope, fuera del montaje de la cola).
+        withTimeoutOrNull(AUDIO_EXTRACTION_TIMEOUT_MS) {
+            extractorScope.async(Dispatchers.IO) {
+                // Se delega en YouTubeStreamResolver, el extractor validado de la
+                // app: inicializa NewPipe, preselecciona la versión del cliente
+                // WEB (evita fallos en redes bloqueadas) y prefiere el audio puro.
+                YouTubeStreamResolver.resolveSingleAudioUrl(videoId)
+            }.await()
         }
-    }
 
     // Convierte una lista del usuario en un elemento navegable (carpeta) que
     // Android Auto muestra en la raíz; al pulsarlo se consultan sus canciones.
@@ -144,21 +165,91 @@ class PlaybackService : MediaLibraryService() {
             )
             .build()
 
-    // Convierte una canción de la app en un elemento reproducible: mediaId = ID
-    // del vídeo de YouTube, que onAddMediaItems usa para extraer la URL del audio.
-    private fun Song.asMediaItem(): MediaItem =
+    // Convierte una canción de la app en un elemento reproducible: mediaId =
+    // "playlistId:youtubeId" (con esto onSetMediaItems sabe a qué lista
+    // pertenece para montar la cola completa) e incluye la carátula del vídeo.
+    private fun Song.asMediaItem(playlistId: String): MediaItem =
         MediaItem.Builder()
-            .setMediaId(youtubeId)
+            .setMediaId("$playlistId$MEDIA_ID_SEPARATOR$youtubeId")
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(title)
                     .setArtist(artist)
                     .setDurationMs(durationSeconds * C.MILLIS_PER_SECOND)
+                    .setArtworkUri(Uri.parse(imageUrl))
                     .setIsBrowsable(false)
                     .setIsPlayable(true)
                     .build(),
             )
             .build()
+
+    // Extrae (playlistId, youtubeId) de un mediaId de canción. Si el mediaId no
+    // tiene el prefijo de lista (p. ej. contenido externo), playlistId es null.
+    private fun splitMediaId(mediaId: String): Pair<String?, String> {
+        val index = mediaId.indexOf(MEDIA_ID_SEPARATOR)
+        return if (index > 0) {
+            mediaId.substring(0, index) to mediaId.substring(index + 1)
+        } else {
+            null to mediaId
+        }
+    }
+
+    private fun youtubeThumbnailUri(youtubeId: String): Uri =
+        Uri.parse("$THUMBNAIL_BASE_URL/$youtubeId/hqdefault.jpg")
+
+    // Añade la carátula (si el ítem recibido no la trae) a partir del
+    // youtubeId, para que la notificación y Android Auto muestren portada.
+    private fun MediaItem.ensureArtwork(): MediaItem {
+        if (mediaMetadata.artworkUri != null) return this
+        val (_, youtubeId) = splitMediaId(mediaId)
+        return buildUpon()
+            .setMediaMetadata(
+                mediaMetadata.buildUpon()
+                    .setArtworkUri(youtubeThumbnailUri(youtubeId))
+                    .build(),
+            )
+            .build()
+    }
+
+    // Resuelve la URI de audio de una canción (extracción con NewPipe) y
+    // devuelve el MediaItem con la URI de audio y la carátula ya incluidas. Si
+    // la extracción falla se devuelve el ítem sin cambios (se conserva en la
+    // cola aunque no sea reproducible). La extracción corre en Dispatchers.IO.
+    private suspend fun resolveSong(item: MediaItem): MediaItem {
+        val (_, youtubeId) = splitMediaId(item.mediaId)
+        val audioUrl = getYoutubeAudioUrl(youtubeId)
+        return if (audioUrl == null) {
+            item.ensureArtwork()
+        } else {
+            item.ensureArtwork().buildUpon()
+                .setUri(Uri.parse(audioUrl))
+                .build()
+        }
+    }
+
+    // Resuelve la URI de audio de todas las canciones de la cola de forma
+    // secuencial (una extracción tras otra, sin saturar YouTube con peticiones
+    // en paralelo), empezando por la canción activa para que arranque cuanto
+    // antes. Devuelve la cola con cada MediaItem listo para reproducirse.
+    // ExoPlayer exige que TODOS los ítems tengan URI para montar la cola con
+    // setMediaItems (si alguno no la tiene, la creación de fuentes lanza y la
+    // cola no se monta); por eso se resuelve la lista completa antes de
+    // devolverla y de aplicarla al reproductor.
+    private suspend fun resolveQueue(
+        items: List<MediaItem>,
+        activeIndex: Int,
+    ): MutableList<MediaItem> {
+        val resolved = items.toMutableList()
+        val order = if (activeIndex in items.indices) {
+            (activeIndex until items.size) + (0 until activeIndex)
+        } else {
+            items.indices.toList()
+        }
+        for (i in order) {
+            resolved[i] = resolveSong(resolved[i])
+        }
+        return resolved
+    }
 
     // Espera (con timeout) a que FirebaseAuth restaure la sesión al arrancar el
     // proceso: si currentUser devuelve null porque el auth todavía no ha
@@ -204,7 +295,7 @@ class PlaybackService : MediaLibraryService() {
                 .orEmpty()
             Log.d(TAG_MEDIA, "onGetChildren($playlistId): ${songs.size} canciones")
             songs
-                .map { it.asMediaItem() }
+                .map { it.asMediaItem(playlistId) }
                 .let { ImmutableList.copyOf(it) }
         } catch (e: Exception) {
             Log.e(TAG_MEDIA, "onGetChildren($playlistId): error consultando canciones", e)
@@ -258,21 +349,81 @@ class PlaybackService : MediaLibraryService() {
             val settableFuture = SettableFuture.create<MutableList<MediaItem>>()
 
             serviceScope.launch {
-                val updatedItems = mutableListOf<MediaItem>()
-
-                for (item in mediaItems) {
-                    val audioUrl = getYoutubeAudioUrl(item.mediaId)
-
-                    if (audioUrl != null) {
-                        val updatedItem = item.buildUpon()
-                            .setUri(Uri.parse(audioUrl))
-                            .build()
-                        updatedItems.add(updatedItem)
-                    } else {
-                        updatedItems.add(item)
-                    }
+                try {
+                    // Se resuelven las URIs de audio de todos los ítems de la
+                    // cola (secuencial, en segundo plano, activo primero) antes
+                    // de devolverlos: ExoPlayer necesita el URI en cada ítem.
+                    val updatedItems = resolveQueue(mediaItems, activeIndex = 0)
+                    settableFuture.set(updatedItems)
+                } catch (e: Exception) {
+                    Log.e(TAG_MEDIA, "onAddMediaItems: error resolviendo la cola", e)
+                    settableFuture.set(mediaItems)
                 }
-                settableFuture.set(updatedItems)
+            }
+            return settableFuture
+        }
+
+        override fun onSetMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: MutableList<MediaItem>,
+            startIndex: Int,
+            startPositionMs: Long
+        ): ListenableFuture<MediaItemsWithStartPosition> {
+
+            val settableFuture = SettableFuture.create<MediaItemsWithStartPosition>()
+
+            serviceScope.launch {
+                try {
+                    val (playlistId, selectedYoutubeId) = splitMediaId(
+                        mediaItems.firstOrNull()?.mediaId.orEmpty(),
+                    )
+
+                    // El usuario ha pulsado una canción dentro de una de sus listas:
+                    // en lugar de enviar solo esa canción aislada a la cola (que
+                    // impedía saltar de pista con el volante y el autoplay), se carga
+                    // la lista completa en el reproductor (player.setMediaItems) y se
+                    // posiciona en el ítem seleccionado (seekTo(index, 0L)).
+                    if (playlistId != null) {
+                        val songs = playlistRepository.getPlaylist(playlistId)?.tracks.orEmpty()
+                        Log.d(
+                            TAG_MEDIA,
+                            "onSetMediaItems($playlistId): ${songs.size} canciones en la cola",
+                        )
+
+                        val selectedIndex = songs.indexOfFirst { it.youtubeId == selectedYoutubeId }
+                            .takeIf { it >= 0 }
+                            ?: startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
+
+                        val allItems = songs.map { it.asMediaItem(playlistId) }
+                        // Se resuelven las URIs de audio de todas las canciones
+                        // (activo primero, resto secuencial) y se monta la cola
+                        // completa, empezando en el ítem seleccionado.
+                        val resolved = resolveQueue(allItems, activeIndex = selectedIndex)
+
+                        // Se devuelve la cola completa a la sesión y, además, se
+                        // monta directamente en el reproductor: así ExoPlayer recibe
+                        // la lista entera y arranca en el ítem seleccionado
+                        // (seekTo(index, 0L)).
+                        settableFuture.set(
+                            MediaItemsWithStartPosition(resolved, selectedIndex, 0L),
+                        )
+                        mediaLibrarySession?.player?.setMediaItems(resolved, selectedIndex, 0L)
+                    } else {
+                        // Contenido ajeno a las listas de VibeTube: se resuelve la
+                        // cola recibida tal cual (activo primero, resto secuencial).
+                        val resolved = resolveQueue(mediaItems, activeIndex = 0)
+                        settableFuture.set(
+                            MediaItemsWithStartPosition(resolved, startIndex, startPositionMs),
+                        )
+                        mediaLibrarySession?.player?.setMediaItems(resolved, startIndex, startPositionMs)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG_MEDIA, "onSetMediaItems: error montando la cola", e)
+                    settableFuture.set(
+                        MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs),
+                    )
+                }
             }
             return settableFuture
         }

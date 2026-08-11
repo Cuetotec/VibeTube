@@ -77,6 +77,17 @@ class PlaylistRepository(
         return document.takeIf { it.exists() }?.toPlaylist()
     }
 
+    // Consulta única (una sola lectura, sin listener) de todas las listas del
+    // usuario. Se usa fuera de la UI (p. ej. en PlaybackService para Android
+    // Auto), donde no interesa observar cambios en tiempo real.
+    suspend fun getUserPlaylists(ownerId: String): List<Playlist> {
+        val snapshot = firestore.collection(PLAYLISTS_COLLECTION)
+            .whereEqualTo("ownerId", ownerId)
+            .get()
+            .await()
+        return snapshot.documents.mapNotNull { it.toPlaylist() }
+    }
+
     private fun Flow<List<Playlist>>.filterPublic(): Flow<List<Playlist>> =
         map { playlists -> playlists.filter { it.isPublic } }
 

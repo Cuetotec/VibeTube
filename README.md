@@ -9,15 +9,17 @@
 - **📱 Reproducción Híbrida Inteligente (Audio & Vídeo):**
   - **Pantalla encendida:** Reproducción de vídeo nativa/web fluida en primer plano con soporte para pantalla completa.
   - **Pantalla apagada / Background:** Transición transparente a reproductor nativo de audio en segundo plano sin interrumpir la reproducción.
-- **🔄 Conmutación Dinámica (Seamless Handshake):** Sincronización automática de marcas de tiempo (*timestamps*) entre el WebView y ExoPlayer al encender o apagar la pantalla.
+- **🔄 Conmutación Dinámica (Seamless Handshake):** Sincronización automática de marcas de tiempo (*timestamps*) entre el WebView y ExoPlayer al encender        o apagar la pantalla.
 - **🎨 Personalización de Perfil:**
   - **Avatar & Fondos:** Edición y personalización del avatar de usuario y la imagen de fondo de perfil para darle una identidad única a tu cuenta.
-- **⚡ Extracción de Streams en Tiempo Real:** Utiliza **NewPipeExtractor** para resolver streams de audio directa y eficientemente (`M4A`, `Opus`) sin depender de la API oficial de YouTube.
-- **🎛️ Control Multimedia Nativo:** Integración completa con la notificación de control multimedia de Android, pantalla de bloqueo, controles Bluetooth y de auriculares via `Media3 / MediaSession`.
+- **⚡ Extracción de Streams en Tiempo Real:** Utiliza **NewPipeExtractor** para resolver streams de audio directa y eficientemente (`M4A`, `Opus`) sin         depender de la API oficial de YouTube.
+- **🎛️ Control Multimedia Nativo:** Integración completa con la notificación de control multimedia de Android, pantalla de bloqueo, controles Bluetooth y        de auriculares via `Media3 / MediaSession`.
 - **📜 Gestión de Listas de Reproducción:** Reproducción secuencial y concurrente gestionada defensivamente mediante corrutinas de Kotlin.
 - **👥 Funcionalidades Sociales y Amigos:**
   - **Añadir Amigos:** Conéctate con otros usuarios para ver qué están escuchando y compartir el catálogo de contenido.
   - **Compartir Listas de Reproducción:** Envía y recibe listas de reproducción directamente entre amigos o genera enlaces compatibles.
+- 🚗 **Soporte completo para Android Auto:** Explora tus listas de reproducción y reproduce tu música directamente desde la pantalla táctil de tu coche o       desde los mandos del volante.
+- 🔀 **Controles avanzados de reproducción:** Modo aleatorio (Shuffle), repetición, visualización de carátulas en tiempo real y *handoff* transparente          entre pantalla y segundo plano.
     
 ---
 
@@ -31,6 +33,9 @@
 - **Cliente HTTP:** OkHttpClient con gestión persistente de cookies (`CookieJar`) y soporte para headers de consentimiento (`SOCS`)
 - **Asincronía & Concurrencia:** Kotlin Coroutines (`StateFlow`, `SharedFlow`, `Mutex`, `Semaphore`)
 - **Gestión de Ciclo de Vida:** LifecycleObserver, BroadcastReceiver de estado de pantalla (`ACTION_SCREEN_OFF` / `ACTION_SCREEN_ON`)
+- **Media3 & ExoPlayer:** Reproducción nativa en segundo plano mediante `MediaLibraryService` y `MediaSession`.
+- **Integración con Android Auto:** Exposición del árbol de contenidos multimedia (`MediaBrowserServiceCompat`) para la navegación e integración con los       controles físicos del vehículo.
+- **Extracción de Audio Nativa:** Utiliza `NewPipeExtractor` con soporte para caché en memoria, timeouts optimizados y manejo de cookies (`SOCS`) para         garantizar cargas instantáneas.
 
 ---
 

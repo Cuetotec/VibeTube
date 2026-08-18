@@ -31,7 +31,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
+import androidx.media3.common.Player
+import androidx.media3.session.CommandButton
+import java.util.concurrent.ConcurrentHashMap
 
 
 private const val STREAM_USER_AGENT =
@@ -74,6 +78,15 @@ class PlaybackService : MediaLibraryService() {
     // montaje de la cola (fetchPage() es una llamada de red bloqueante que
     // withContext no puede interrumpir a tiempo).
     private val extractorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    // Control de extracciones: cancela el trabajo anterior antes de lanzar uno
+    // nuevo para evitar extracciones duplicadas que compitan entre sí.
+    @Volatile
+    private var currentExtractionJob: Job? = null
+
+    // Caché de URLs de audio resueltas (youtubeId → audioUrl): evita re-extractar
+    // la misma canción si el usuario pulsa dos veces sobre ella.
+    private val urlCache = ConcurrentHashMap<String, String>()
 
     // Repositorios reales de la app: las listas que ve Android Auto son las del
     // usuario autenticado en Firestore (no datos estáticos). Se construyen con
@@ -119,7 +132,13 @@ class PlaybackService : MediaLibraryService() {
         player.playWhenReady = true
 
         // Inicialización de la sesión multimedia para android auto
+        val shuffleButton = CommandButton.Builder(CommandButton.ICON_SHUFFLE_OFF)
+            .setDisplayName("Aleatorio")
+            .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
+            .build()
+
         mediaLibrarySession = MediaLibrarySession.Builder(this, player, LibraryCallback())
+            .setCustomLayout(listOf(shuffleButton))
             .build()
     }
 
@@ -127,6 +146,8 @@ class PlaybackService : MediaLibraryService() {
         mediaLibrarySession
 
     override fun onDestroy() {
+        currentExtractionJob?.cancel()
+        urlCache.clear()
         serviceJob.cancel()
         extractorScope.cancel()
         mediaLibrarySession?.run {
@@ -137,18 +158,19 @@ class PlaybackService : MediaLibraryService() {
         super.onDestroy()
     }
 
-    private suspend fun getYoutubeAudioUrl(videoId: String): String? =
+    private suspend fun getYoutubeAudioUrl(videoId: String): String? {
+        // Reutiliza la URL si ya se extrajo previamente (evita re-extracciones
+        // duplicadas cuando el usuario pulsa dos veces sobre la misma canción).
+        urlCache[videoId]?.let { return it }
         // Timeout real: se espera como máximo AUDIO_EXTRACTION_TIMEOUT_MS a la
         // extracción. Si se agota, se devuelve null y la cola se monta igualmente
         // (la extracción sigue en extractorScope, fuera del montaje de la cola).
-        withTimeoutOrNull(AUDIO_EXTRACTION_TIMEOUT_MS) {
+        return withTimeoutOrNull(AUDIO_EXTRACTION_TIMEOUT_MS) {
             extractorScope.async(Dispatchers.IO) {
-                // Se delega en YouTubeStreamResolver, el extractor validado de la
-                // app: inicializa NewPipe, preselecciona la versión del cliente
-                // WEB (evita fallos en redes bloqueadas) y prefiere el audio puro.
                 YouTubeStreamResolver.resolveSingleAudioUrl(videoId)
             }.await()
-        }
+        }?.also { url -> urlCache[videoId] = url }
+    }
 
     // Convierte una lista del usuario en un elemento navegable (carpeta) que
     // Android Auto muestra en la raíz; al pulsarlo se consultan sus canciones.
@@ -340,19 +362,41 @@ class PlaybackService : MediaLibraryService() {
             return Futures.immediateFuture(LibraryResult.ofItem(rootItem, params))
         }
 
+        // Habilita el botón de Aleatorio (shuffle) en Android Auto: sin este
+        // comando en availablePlayerCommands, el salpicadero no dibuja el
+        // icono de shuffle y el usuario no puede activar la reproducción
+        // aleatoria desde el coche.
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): MediaSession.ConnectionResult {
+            val defaultResult = super.onConnect(session, controller)
+            val playerCommands = defaultResult.availablePlayerCommands.buildUpon()
+                .add(Player.COMMAND_SET_SHUFFLE_MODE)
+                .build()
+            return MediaSession.ConnectionResult.accept(
+                defaultResult.availableSessionCommands,
+                playerCommands
+            )
+        }
+
         override fun onAddMediaItems(
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>
         ): ListenableFuture<MutableList<MediaItem>> {
 
+            // Si los ítems ya tienen URI de audio resuelta (vinieron de
+            // onSetMediaItems ya procesados), no re-extraer.
+            val alreadyResolved = mediaItems.all { it.localConfiguration?.uri != null }
+            if (alreadyResolved) {
+                return Futures.immediateFuture(mediaItems)
+            }
+
             val settableFuture = SettableFuture.create<MutableList<MediaItem>>()
 
             serviceScope.launch {
                 try {
-                    // Se resuelven las URIs de audio de todos los ítems de la
-                    // cola (secuencial, en segundo plano, activo primero) antes
-                    // de devolverlos: ExoPlayer necesita el URI en cada ítem.
                     val updatedItems = resolveQueue(mediaItems, activeIndex = 0)
                     settableFuture.set(updatedItems)
                 } catch (e: Exception) {
@@ -373,17 +417,17 @@ class PlaybackService : MediaLibraryService() {
 
             val settableFuture = SettableFuture.create<MediaItemsWithStartPosition>()
 
-            serviceScope.launch {
+            // Cancela la extracción anterior: si el usuario pulsa otra canción
+            // (o la misma de nuevo) mientras la anterior aún se extrae, no tiene
+            // sentido seguir extrayendo la URL de audio de la cola anterior.
+            currentExtractionJob?.cancel()
+
+            currentExtractionJob = serviceScope.launch {
                 try {
                     val (playlistId, selectedYoutubeId) = splitMediaId(
                         mediaItems.firstOrNull()?.mediaId.orEmpty(),
                     )
 
-                    // El usuario ha pulsado una canción dentro de una de sus listas:
-                    // en lugar de enviar solo esa canción aislada a la cola (que
-                    // impedía saltar de pista con el volante y el autoplay), se carga
-                    // la lista completa en el reproductor (player.setMediaItems) y se
-                    // posiciona en el ítem seleccionado (seekTo(index, 0L)).
                     if (playlistId != null) {
                         val songs = playlistRepository.getPlaylist(playlistId)?.tracks.orEmpty()
                         Log.d(
@@ -396,27 +440,16 @@ class PlaybackService : MediaLibraryService() {
                             ?: startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
 
                         val allItems = songs.map { it.asMediaItem(playlistId) }
-                        // Se resuelven las URIs de audio de todas las canciones
-                        // (activo primero, resto secuencial) y se monta la cola
-                        // completa, empezando en el ítem seleccionado.
                         val resolved = resolveQueue(allItems, activeIndex = selectedIndex)
 
-                        // Se devuelve la cola completa a la sesión y, además, se
-                        // monta directamente en el reproductor: así ExoPlayer recibe
-                        // la lista entera y arranca en el ítem seleccionado
-                        // (seekTo(index, 0L)).
                         settableFuture.set(
                             MediaItemsWithStartPosition(resolved, selectedIndex, 0L),
                         )
-                        mediaLibrarySession?.player?.setMediaItems(resolved, selectedIndex, 0L)
                     } else {
-                        // Contenido ajeno a las listas de VibeTube: se resuelve la
-                        // cola recibida tal cual (activo primero, resto secuencial).
                         val resolved = resolveQueue(mediaItems, activeIndex = 0)
                         settableFuture.set(
                             MediaItemsWithStartPosition(resolved, startIndex, startPositionMs),
                         )
-                        mediaLibrarySession?.player?.setMediaItems(resolved, startIndex, startPositionMs)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG_MEDIA, "onSetMediaItems: error montando la cola", e)

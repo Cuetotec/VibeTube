@@ -371,13 +371,17 @@ class PlaybackService : MediaLibraryService() {
             controller: MediaSession.ControllerInfo
         ): MediaSession.ConnectionResult {
             val defaultResult = super.onConnect(session, controller)
+
+            val sessionCommands = defaultResult.availableSessionCommands
             val playerCommands = defaultResult.availablePlayerCommands.buildUpon()
                 .add(Player.COMMAND_SET_SHUFFLE_MODE)
                 .build()
-            return MediaSession.ConnectionResult.accept(
-                defaultResult.availableSessionCommands,
-                playerCommands
-            )
+
+            // Notifica al controlador (Android Auto) los comandos disponibles,
+            // incluyendo el de shuffle, para que reserve el botón en la UI.
+            session.setAvailableCommands(controller, sessionCommands, playerCommands)
+
+            return MediaSession.ConnectionResult.accept(sessionCommands, playerCommands)
         }
 
         override fun onAddMediaItems(
@@ -393,9 +397,14 @@ class PlaybackService : MediaLibraryService() {
                 return Futures.immediateFuture(mediaItems)
             }
 
+            // Cancela la extracción anterior: si el usuario pulsa otra canción
+            // (o la misma de nuevo) mientras la anterior aún se extrae, no tiene
+            // sentido seguir extrayendo la URL de audio de la cola anterior.
+            currentExtractionJob?.cancel()
+
             val settableFuture = SettableFuture.create<MutableList<MediaItem>>()
 
-            serviceScope.launch {
+            currentExtractionJob = serviceScope.launch {
                 try {
                     val updatedItems = resolveQueue(mediaItems, activeIndex = 0)
                     settableFuture.set(updatedItems)
@@ -417,11 +426,6 @@ class PlaybackService : MediaLibraryService() {
 
             val settableFuture = SettableFuture.create<MediaItemsWithStartPosition>()
 
-            // Cancela la extracción anterior: si el usuario pulsa otra canción
-            // (o la misma de nuevo) mientras la anterior aún se extrae, no tiene
-            // sentido seguir extrayendo la URL de audio de la cola anterior.
-            currentExtractionJob?.cancel()
-
             currentExtractionJob = serviceScope.launch {
                 try {
                     val (playlistId, selectedYoutubeId) = splitMediaId(
@@ -440,15 +444,15 @@ class PlaybackService : MediaLibraryService() {
                             ?: startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
 
                         val allItems = songs.map { it.asMediaItem(playlistId) }
-                        val resolved = resolveQueue(allItems, activeIndex = selectedIndex)
-
+                        // Solo metadatos: la URL de audio se resuelve en
+                        // onAddMediaItems, NO aquí. Esto evita que el future
+                        // tarde decenas de segundos y bloquee el IPC de Android Auto.
                         settableFuture.set(
-                            MediaItemsWithStartPosition(resolved, selectedIndex, 0L),
+                            MediaItemsWithStartPosition(allItems, selectedIndex, 0L),
                         )
                     } else {
-                        val resolved = resolveQueue(mediaItems, activeIndex = 0)
                         settableFuture.set(
-                            MediaItemsWithStartPosition(resolved, startIndex, startPositionMs),
+                            MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs),
                         )
                     }
                 } catch (e: Exception) {

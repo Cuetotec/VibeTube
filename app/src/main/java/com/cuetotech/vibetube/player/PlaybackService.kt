@@ -15,7 +15,6 @@ import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSession.MediaItemsWithStartPosition
-import androidx.media3.session.MediaSessionService
 import com.cuetotech.vibetube.data.AuthRepository
 import com.cuetotech.vibetube.data.PlaylistRepository
 import com.cuetotech.vibetube.data.Song
@@ -27,7 +26,6 @@ import com.google.common.util.concurrent.SettableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -72,12 +70,6 @@ class PlaybackService : MediaLibraryService() {
 
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
-
-    // Scope desacoplado para las extracciones de audio: al abandonar una
-    // extracción por timeout, esta sigue en segundo plano sin bloquear el
-    // montaje de la cola (fetchPage() es una llamada de red bloqueante que
-    // withContext no puede interrumpir a tiempo).
-    private val extractorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Control de extracciones: cancela el trabajo anterior antes de lanzar uno
     // nuevo para evitar extracciones duplicadas que compitan entre sí.
@@ -131,6 +123,16 @@ class PlaybackService : MediaLibraryService() {
         // pulsar una canción en Android Auto, el reproductor arranca solo.
         player.playWhenReady = true
 
+        // Listener de shuffle: cuando Android Auto activa/desactiva shuffle,
+        // reordena la cola real del ExoPlayer para que la reproducción sea
+        // efectivamente aleatoria (sin esto, ExoPlayer solo cambia el flag
+        // pero no reordena, y Android Auto oculta el botón).
+        player.addListener(object : Player.Listener {
+            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                player.setShuffleModeEnabled(shuffleModeEnabled)
+            }
+        })
+
         // Inicialización de la sesión multimedia para android auto
         val shuffleButton = CommandButton.Builder(CommandButton.ICON_SHUFFLE_OFF)
             .setDisplayName("Aleatorio")
@@ -149,27 +151,12 @@ class PlaybackService : MediaLibraryService() {
         currentExtractionJob?.cancel()
         urlCache.clear()
         serviceJob.cancel()
-        extractorScope.cancel()
         mediaLibrarySession?.run {
             player.release()
             release()
         }
         mediaLibrarySession = null
         super.onDestroy()
-    }
-
-    private suspend fun getYoutubeAudioUrl(videoId: String): String? {
-        // Reutiliza la URL si ya se extrajo previamente (evita re-extracciones
-        // duplicadas cuando el usuario pulsa dos veces sobre la misma canción).
-        urlCache[videoId]?.let { return it }
-        // Timeout real: se espera como máximo AUDIO_EXTRACTION_TIMEOUT_MS a la
-        // extracción. Si se agota, se devuelve null y la cola se monta igualmente
-        // (la extracción sigue en extractorScope, fuera del montaje de la cola).
-        return withTimeoutOrNull(AUDIO_EXTRACTION_TIMEOUT_MS) {
-            extractorScope.async(Dispatchers.IO) {
-                YouTubeStreamResolver.resolveSingleAudioUrl(videoId)
-            }.await()
-        }?.also { url -> urlCache[videoId] = url }
     }
 
     // Convierte una lista del usuario en un elemento navegable (carpeta) que
@@ -231,46 +218,6 @@ class PlaybackService : MediaLibraryService() {
                     .build(),
             )
             .build()
-    }
-
-    // Resuelve la URI de audio de una canción (extracción con NewPipe) y
-    // devuelve el MediaItem con la URI de audio y la carátula ya incluidas. Si
-    // la extracción falla se devuelve el ítem sin cambios (se conserva en la
-    // cola aunque no sea reproducible). La extracción corre en Dispatchers.IO.
-    private suspend fun resolveSong(item: MediaItem): MediaItem {
-        val (_, youtubeId) = splitMediaId(item.mediaId)
-        val audioUrl = getYoutubeAudioUrl(youtubeId)
-        return if (audioUrl == null) {
-            item.ensureArtwork()
-        } else {
-            item.ensureArtwork().buildUpon()
-                .setUri(Uri.parse(audioUrl))
-                .build()
-        }
-    }
-
-    // Resuelve la URI de audio de todas las canciones de la cola de forma
-    // secuencial (una extracción tras otra, sin saturar YouTube con peticiones
-    // en paralelo), empezando por la canción activa para que arranque cuanto
-    // antes. Devuelve la cola con cada MediaItem listo para reproducirse.
-    // ExoPlayer exige que TODOS los ítems tengan URI para montar la cola con
-    // setMediaItems (si alguno no la tiene, la creación de fuentes lanza y la
-    // cola no se monta); por eso se resuelve la lista completa antes de
-    // devolverla y de aplicarla al reproductor.
-    private suspend fun resolveQueue(
-        items: List<MediaItem>,
-        activeIndex: Int,
-    ): MutableList<MediaItem> {
-        val resolved = items.toMutableList()
-        val order = if (activeIndex in items.indices) {
-            (activeIndex until items.size) + (0 until activeIndex)
-        } else {
-            items.indices.toList()
-        }
-        for (i in order) {
-            resolved[i] = resolveSong(resolved[i])
-        }
-        return resolved
     }
 
     // Espera (con timeout) a que FirebaseAuth restaure la sesión al arrancar el
@@ -385,25 +332,35 @@ class PlaybackService : MediaLibraryService() {
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>
         ): ListenableFuture<MutableList<MediaItem>> {
-
             // Si los ítems ya tienen URI de audio resuelta (vinieron de
-            // onSetMediaItems ya procesados), no re-extraer.
+            // onSetMediaItems con resolución paralela), no re-extraer.
             val alreadyResolved = mediaItems.all { it.localConfiguration?.uri != null }
             if (alreadyResolved) {
                 return Futures.immediateFuture(mediaItems)
             }
-
-            // Cancela la extracción anterior: si el usuario pulsa otra canción
-            // (o la misma de nuevo) mientras la anterior aún se extrae, no tiene
-            // sentido seguir extrayendo la URL de audio de la cola anterior.
+            // Si llegan ítems sin URIs (p. ej. de un controller externo),
+            // resuelve en paralelo usando el mismo mecanismo que onSetMediaItems.
             currentExtractionJob?.cancel()
-
             val settableFuture = SettableFuture.create<MutableList<MediaItem>>()
-
             currentExtractionJob = serviceScope.launch {
                 try {
-                    val updatedItems = resolveQueue(mediaItems, activeIndex = 0)
-                    settableFuture.set(updatedItems)
+                    val urls = YouTubeStreamResolver.resolveAudioUrls(
+                        mediaItems.map { item ->
+                            val (_, youtubeId) = splitMediaId(item.mediaId)
+                            youtubeId
+                        },
+                    )
+                    val resolved = mediaItems.mapIndexed { index, item ->
+                        val url = urls[index]
+                        if (url != null) {
+                            item.ensureArtwork().buildUpon()
+                                .setUri(Uri.parse(url))
+                                .build()
+                        } else {
+                            item.ensureArtwork()
+                        }
+                    }.toMutableList()
+                    settableFuture.set(resolved)
                 } catch (e: Exception) {
                     Log.e(TAG_MEDIA, "onAddMediaItems: error resolviendo la cola", e)
                     settableFuture.set(mediaItems)
@@ -419,6 +376,16 @@ class PlaybackService : MediaLibraryService() {
             startIndex: Int,
             startPositionMs: Long
         ): ListenableFuture<MediaItemsWithStartPosition> {
+
+            // Si los ítems ya vienen con URIs resueltas (syncPlaylist del
+            // teléfono), pasámoslos directamente sin re-extraer.
+            val alreadyResolved = mediaItems.all { it.localConfiguration?.uri != null }
+            if (alreadyResolved) {
+                Log.d(TAG_MEDIA, "onSetMediaItems: ítems ya resueltos, pasando directamente")
+                return Futures.immediateFuture(
+                    MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs),
+                )
+            }
 
             val settableFuture = SettableFuture.create<MediaItemsWithStartPosition>()
 
@@ -440,11 +407,35 @@ class PlaybackService : MediaLibraryService() {
                             ?: startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
 
                         val allItems = songs.map { it.asMediaItem(playlistId) }
-                        // Solo metadatos: la URL de audio se resuelve en
-                        // onAddMediaItems, NO aquí. Esto evita que el future
-                        // tarde decenas de segundos y bloquee el IPC de Android Auto.
+
+                        // Resolución paralela de URLs de audio: usa el mismo
+                        // mecanismo que el teléfono (resolveAudioUrls) con
+                        // semáforo de 4 concurrencias. Mucho más rápido que la
+                        // resolución secuencial anterior (1 canción a la vez).
+                        val urls = YouTubeStreamResolver.resolveAudioUrls(
+                            songs.map { it.youtubeId },
+                        )
+
+                        val resolvedItems = allItems.mapIndexed { index, item ->
+                            val url = urls[index]
+                            if (url != null) {
+                                urlCache[songs[index].youtubeId] = url
+                                item.ensureArtwork().buildUpon()
+                                    .setUri(Uri.parse(url))
+                                    .build()
+                            } else {
+                                Log.w(TAG_MEDIA, "onSetMediaItems: no se resolvió audio de ${songs[index].youtubeId}")
+                                item.ensureArtwork()
+                            }
+                        }
+
+                        Log.d(
+                            TAG_MEDIA,
+                            "onSetMediaItems($playlistId): ${urls.count { it != null }}/${songs.size} pistas con audio resuelto",
+                        )
+
                         settableFuture.set(
-                            MediaItemsWithStartPosition(allItems, selectedIndex, 0L),
+                            MediaItemsWithStartPosition(resolvedItems, selectedIndex, 0L),
                         )
                     } else {
                         settableFuture.set(

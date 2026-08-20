@@ -15,15 +15,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.coroutines.resume
 
 private const val TAG = "VibeTubeHandoff"
-
-// Tiempo máximo de espera por la posición del WebView (getCurrentTime vía JS);
-// si el reproductor no responde, se reanuda el servicio sin buscar.
-private const val POSITION_TIMEOUT_MS = 1_000L
 
 /**
  * Coordina la conmutación (handoff) entre el reproductor WebView (el vídeo
@@ -158,8 +151,10 @@ class PlaybackHandoff(
 
     /**
      * Transición a segundo plano (pantalla apagada o app en segundo plano):
-     * 1) captura la posición del WebView, 2) pausa y silencia el WebView,
-     * 3) el servicio reanuda desde esa posición.
+     * pausa y silencia el WebView, y el servicio reanuda desde su posición
+     * actual (ExoPlayer conserva la posición al pausar en primer plano).
+     * No se lee la posición del WebView: la Evaluación JS es lenta y puede
+     * bloquear cuando el sistema está apagando la pantalla.
      */
     private suspend fun handOffToService() {
         if (!playbackController.isActive.value) {
@@ -167,10 +162,9 @@ class PlaybackHandoff(
             return
         }
         Log.d(TAG, "handOffToService: segundo plano, delegando el audio al servicio")
-        val position = readWebViewPosition()
         webPlayer.pause()
         webPlayer.setMuted(true)
-        playbackController.playFromPosition(position)
+        playbackController.play()
     }
 
     /**
@@ -234,21 +228,4 @@ class PlaybackHandoff(
         }
     }
 
-    // Lee la posición del WebView (ms) con timeout y tolerante a nulos: si el
-    // WebView no está registrado o no responde (player no listo), devuelve null
-    // y la transición reanuda el servicio desde su posición actual.
-    private suspend fun readWebViewPosition(): Long? {
-        if (!webPlayer.isAttached()) return null
-        return withTimeoutOrNull(POSITION_TIMEOUT_MS) {
-            suspendCancellableCoroutine { continuation ->
-                webPlayer.currentPosition { position ->
-                    // Protección contra doble reanudación (timeout vs. callback):
-                    // el timeout cancela la corrutina, y el callback tardío es no-op.
-                    if (continuation.isActive) {
-                        continuation.resume(position)
-                    }
-                }
-            }
-        }
-    }
 }

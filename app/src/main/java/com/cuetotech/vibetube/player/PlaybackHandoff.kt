@@ -23,7 +23,7 @@ private const val TAG = "VibeTubeHandoff"
 
 // Tiempo máximo de espera por la posición del WebView (getCurrentTime vía JS);
 // si el reproductor no responde, se reanuda el servicio sin buscar.
-private const val POSITION_TIMEOUT_MS = 2_000L
+private const val POSITION_TIMEOUT_MS = 1_000L
 
 /**
  * Coordina la conmutación (handoff) entre el reproductor WebView (el vídeo

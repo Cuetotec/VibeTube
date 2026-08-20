@@ -58,7 +58,7 @@ private const val TAG_MEDIA = "VibeTubeMedia"
 // Espera máxima a que FirebaseAuth restaure la sesión al arrancar el proceso
 // (el usuario puede estar registrado y currentUser aún devolver null unos
 // instantes). Pasado este tiempo se devuelve la lista vacía.
-private const val AUTH_TIMEOUT_MS = 2_000L
+private const val AUTH_TIMEOUT_MS = 500L
 private const val AUTH_RETRY_DELAY_MS = 100L
 
 // Tiempo máximo de una extracción de audio (NewPipe). Si no se resuelve a
@@ -376,10 +376,6 @@ class PlaybackService : MediaLibraryService() {
             val playerCommands = defaultResult.availablePlayerCommands.buildUpon()
                 .add(Player.COMMAND_SET_SHUFFLE_MODE)
                 .build()
-
-            // Notifica al controlador (Android Auto) los comandos disponibles,
-            // incluyendo el de shuffle, para que reserve el botón en la UI.
-            session.setAvailableCommands(controller, sessionCommands, playerCommands)
 
             return MediaSession.ConnectionResult.accept(sessionCommands, playerCommands)
         }

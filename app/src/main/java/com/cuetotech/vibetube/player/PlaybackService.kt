@@ -389,13 +389,13 @@ class PlaybackService : MediaLibraryService() {
             session: MediaSession,
             controller: MediaSession.ControllerInfo
         ): MediaSession.ConnectionResult {
-            val defaultResult = super.onConnect(session, controller)
-
-            val sessionCommands = defaultResult.availableSessionCommands
-            val playerCommands = defaultResult.availablePlayerCommands.buildUpon()
-                .add(Player.COMMAND_SET_SHUFFLE_MODE)
-                .build()
-
+            val sessionCommands =
+                MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon().build()
+            val playerCommands =
+                MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+                    .add(Player.COMMAND_SET_SHUFFLE_MODE)
+                    .add(Player.COMMAND_GET_TIMELINE)
+                    .build()
             return MediaSession.ConnectionResult.accept(sessionCommands, playerCommands)
         }
 
@@ -437,18 +437,25 @@ class PlaybackService : MediaLibraryService() {
             }
 
             // Sin URI → es una llamada de Android Auto con mediaId
-            // "playlistId:youtubeId". Extraemos la lista y devolvemos
-            // metadatos INMEDIATAMENTE para que la UI del coche se abra
-            // al instante (0s). La resolución de audio corre en background
-            // y se aplica vía onAddMediaItems cuando esté lista.
+            // "playlistId:youtubeId".
             val (playlistId, selectedYoutubeId) = splitMediaId(
                 mediaItems.firstOrNull()?.mediaId.orEmpty(),
             )
 
             if (playlistId != null) {
-                // Lanzamos la carga de Firestore + extracción en background.
-                // NO bloqueamos el future: se resuelve ya con metadatos para
-                // que Android Auto muestre la cola al instante.
+                // PASO 1: Aplica metadatos al player INMEDIATAMENTE para que
+                // Android Auto abra la pantalla del reproductor al instante (0s).
+                // player.setMediaItem() + prepare() hace que ExoPlayer muestre
+                // título, artista y carátula sin esperar la extracción de audio.
+                val player = mediaLibrarySession?.player
+                if (player != null) {
+                    val metadataItems = mediaItems.map { it.ensureArtwork() }
+                    player.setMediaItems(metadataItems, startIndex, startPositionMs)
+                    player.prepare()
+                    player.playWhenReady = true
+                }
+
+                // PASO 2: Carga la cola completa + extracción de audio en background.
                 currentExtractionJob?.cancel()
                 currentExtractionJob = serviceScope.launch {
                     try {
@@ -487,13 +494,12 @@ class PlaybackService : MediaLibraryService() {
                             "onSetMediaItems($playlistId): ${urls.count { it != null }}/${songs.size} pistas con audio resuelto",
                         )
 
-                        // Aplica la cola resuelta al reproductor cuando las
-                        // URLs estén listas (ExoPlayer ya tiene metadatos
-                        // visibles en Android Auto desde el future anterior).
-                        mediaLibrarySession?.player?.let { player ->
-                            player.setMediaItems(resolvedItems, selectedIndex, 0L)
-                            player.prepare()
-                            player.playWhenReady = true
+                        // Reemplaza la cola con los ítems resueltos (con URIs
+                        // de audio reales) y prepara la reproducción.
+                        player?.let {
+                            it.setMediaItems(resolvedItems, selectedIndex, 0L)
+                            it.prepare()
+                            it.playWhenReady = true
                         }
                     } catch (e: Exception) {
                         Log.e(TAG_MEDIA, "onSetMediaItems: error resolviendo en background", e)

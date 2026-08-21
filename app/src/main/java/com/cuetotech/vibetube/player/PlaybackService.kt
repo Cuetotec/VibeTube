@@ -1,12 +1,9 @@
 @file:OptIn(UnstableApi::class)
 package com.cuetotech.vibetube.player
 
-import android.app.PendingIntent
 import android.os.Bundle
 import android.net.Uri
 import android.util.Log
-import androidx.core.app.NotificationCompat
-import androidx.core.graphics.drawable.IconCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -20,7 +17,6 @@ import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaNotification
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSession.MediaItemsWithStartPosition
-import androidx.media3.session.SessionCommand
 import com.cuetotech.vibetube.data.AuthRepository
 import com.cuetotech.vibetube.data.PlaylistRepository
 import com.cuetotech.vibetube.data.Song
@@ -35,7 +31,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.media3.common.Player
 import androidx.media3.session.CommandButton
@@ -66,22 +61,12 @@ private const val TAG_MEDIA = "VibeTubeMedia"
 private const val AUTH_TIMEOUT_MS = 500L
 private const val AUTH_RETRY_DELAY_MS = 100L
 
-// Tiempo máximo de una extracción de audio (NewPipe). Si no se resuelve a
-// tiempo se devuelve null y la cola se monta igualmente (la resolución
-// perezosa en segundo plano puede reintentarla).
-private const val AUDIO_EXTRACTION_TIMEOUT_MS = 10_000L
-
 class PlaybackService : MediaLibraryService() {
 
     private var mediaLibrarySession: MediaLibrarySession? = null
 
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
-
-    // Control de extracciones: cancela el trabajo anterior antes de lanzar uno
-    // nuevo para evitar extracciones duplicadas que compitan entre sí.
-    @Volatile
-    private var currentExtractionJob: Job? = null
 
     // Caché de URLs de audio resueltas (youtubeId → audioUrl): evita re-extractar
     // la misma canción si el usuario pulsa dos veces sobre ella.
@@ -220,7 +205,6 @@ class PlaybackService : MediaLibraryService() {
         mediaLibrarySession
 
     override fun onDestroy() {
-        currentExtractionJob?.cancel()
         urlCache.clear()
         serviceJob.cancel()
         mediaLibrarySession?.run {
@@ -404,18 +388,55 @@ class PlaybackService : MediaLibraryService() {
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>
         ): ListenableFuture<MutableList<MediaItem>> {
-            // Si los ítems ya tienen URI de audio resuelta (vinieron de
-            // onSetMediaItems con resolución paralela), no re-extraer.
             val alreadyResolved = mediaItems.all { it.localConfiguration?.uri != null }
             if (alreadyResolved) {
                 return Futures.immediateFuture(mediaItems)
             }
-            // NUNCA bloquear aquí en YouTubeStreamResolver. La resolución de
-            // audio corre en background dentro de onSetMediaItems y aplica los
-            // ítems resueltos directamente vía player.setMediaItems().
-            // Devolvemos los ítems con metadatos para que la UI del coche se
-            // mantenga visible mientras el audio se resuelve en background.
-            return Futures.immediateFuture(mediaItems)
+
+            val settableFuture = SettableFuture.create<MutableList<MediaItem>>()
+            serviceScope.launch {
+                try {
+                    val (_, selectedYoutubeId) = splitMediaId(
+                        mediaItems.firstOrNull()?.mediaId.orEmpty(),
+                    )
+                    val youtubeIds = mediaItems.map { item ->
+                        val (_, ytId) = splitMediaId(item.mediaId)
+                        ytId
+                    }
+
+                    Log.d(TAG_MEDIA, "onAddMediaItems: resolviendo ${youtubeIds.size} URLs")
+                    val urls = YouTubeStreamResolver.resolveAudioUrls(youtubeIds)
+
+                    val resolved = mediaItems.mapIndexed { index, item ->
+                        val url = urls[index]
+                        if (url != null) {
+                            val (_, ytId) = splitMediaId(item.mediaId)
+                            urlCache[ytId] = url
+                            item.ensureArtwork().buildUpon()
+                                .setUri(Uri.parse(url))
+                                .build()
+                        } else {
+                            Log.w(TAG_MEDIA, "onAddMediaItems: sin audio para ${youtubeIds[index]}")
+                            item.ensureArtwork()
+                        }
+                    }
+
+                    val selectedIndex = if (selectedYoutubeId.isNotEmpty()) {
+                        mediaItems.indexOfFirst { it.mediaId.endsWith(selectedYoutubeId) }
+                            .takeIf { it >= 0 } ?: 0
+                    } else 0
+
+                    Log.d(
+                        TAG_MEDIA,
+                        "onAddMediaItems: ${urls.count { it != null }}/${youtubeIds.size} pistas resueltas",
+                    )
+                    settableFuture.set(resolved.toMutableList())
+                } catch (e: Exception) {
+                    Log.e(TAG_MEDIA, "onAddMediaItems: error resolviendo URLs", e)
+                    settableFuture.set(mediaItems)
+                }
+            }
+            return settableFuture
         }
 
         override fun onSetMediaItems(
@@ -437,86 +458,13 @@ class PlaybackService : MediaLibraryService() {
             }
 
             // Sin URI → es una llamada de Android Auto con mediaId
-            // "playlistId:youtubeId".
-            val (playlistId, selectedYoutubeId) = splitMediaId(
-                mediaItems.firstOrNull()?.mediaId.orEmpty(),
-            )
-
-            if (playlistId != null) {
-                // PASO 1: Aplica metadatos al player INMEDIATAMENTE para que
-                // Android Auto abra la pantalla del reproductor al instante (0s).
-                // player.setMediaItem() + prepare() hace que ExoPlayer muestre
-                // título, artista y carátula sin esperar la extracción de audio.
-                val player = mediaLibrarySession?.player
-                if (player != null) {
-                    val metadataItems = mediaItems.map { it.ensureArtwork() }
-                    player.setMediaItems(metadataItems, startIndex, startPositionMs)
-                    player.prepare()
-                    player.playWhenReady = true
-                }
-
-                // PASO 2: Carga la cola completa + extracción de audio en background.
-                currentExtractionJob?.cancel()
-                currentExtractionJob = serviceScope.launch {
-                    try {
-                        val songs = playlistRepository.getPlaylist(playlistId)?.tracks.orEmpty()
-                        Log.d(
-                            TAG_MEDIA,
-                            "onSetMediaItems($playlistId): ${songs.size} canciones en la cola (background)",
-                        )
-
-                        val selectedIndex = songs.indexOfFirst { it.youtubeId == selectedYoutubeId }
-                            .takeIf { it >= 0 }
-                            ?: startIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
-
-                        val allItems = songs.map { it.asMediaItem(playlistId) }
-
-                        // Resolución paralela de URLs de audio en background
-                        val urls = YouTubeStreamResolver.resolveAudioUrls(
-                            songs.map { it.youtubeId },
-                        )
-
-                        val resolvedItems = allItems.mapIndexed { index, item ->
-                            val url = urls[index]
-                            if (url != null) {
-                                urlCache[songs[index].youtubeId] = url
-                                item.ensureArtwork().buildUpon()
-                                    .setUri(Uri.parse(url))
-                                    .build()
-                            } else {
-                                Log.w(TAG_MEDIA, "onSetMediaItems: no se resolvió audio de ${songs[index].youtubeId}")
-                                item.ensureArtwork()
-                            }
-                        }
-
-                        Log.d(
-                            TAG_MEDIA,
-                            "onSetMediaItems($playlistId): ${urls.count { it != null }}/${songs.size} pistas con audio resuelto",
-                        )
-
-                        // Reemplaza la cola con los ítems resueltos (con URIs
-                        // de audio reales) y prepara la reproducción.
-                        player?.let {
-                            it.setMediaItems(resolvedItems, selectedIndex, 0L)
-                            it.prepare()
-                            it.playWhenReady = true
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG_MEDIA, "onSetMediaItems: error resolviendo en background", e)
-                    }
-                }
-
-                // Devuelve metadatos al instante: Android Auto abre la
-                // pantalla de reproducción sin esperar la extracción.
-                val metadataItems = mediaItems.map { it.ensureArtwork() }
-                return Futures.immediateFuture(
-                    MediaItemsWithStartPosition(metadataItems, startIndex, startPositionMs),
-                )
-            }
-
-            // Fuera de formato Android Auto: passthrough directo
+            // "playlistId:youtubeId". Devolvemos metadatos con artwork para que
+            // Android Auto abra la pantalla del reproductor al instante.
+            // La resolución de URLs ocurre en onAddMediaItems (el framework la
+            // llama automáticamente después de onSetMediaItems).
+            val metadataItems = mediaItems.map { it.ensureArtwork() }
             return Futures.immediateFuture(
-                MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs),
+                MediaItemsWithStartPosition(metadataItems, startIndex, startPositionMs),
             )
         }
 

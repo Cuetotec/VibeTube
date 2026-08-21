@@ -449,7 +449,17 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **Manifest**: verificado — la única activity es `.MainActivity` (existe, sin renombrar), temas `Theme.App.Starting`/`Theme.VibeTube` presentes, sin componentes eliminados.
 - Verificación: `./gradlew :app:assembleDebug :app:testDebugUnitTest` en verde (20 tests, 0 fallos).
 
-## Pendiente / ideas
+### Iteración 31 — Fix Android Auto: shuffle en notificación, latencia 0ms y eliminación de reproducción duplicada (21-08-2026)
+- **Problemas reportados**: (1) botón shuffle no aparece en Android Auto/notificación; (2) latencia de 10-20s al abrir pantalla del reproductor en el coche; (3) reproducción duplicada al pulsar una canción.
+- **Causa raíz del bug de latencia/duplicación**: `onSetMediaItems` llamaba directamente a `player.setMediaItems(metadataItems, ...)` con items **sin URIs de audio** → `DefaultMediaSourceFactory.createMediaSource()` lanzaba `IllegalStateException` porque no podía crear `MediaSource` sin URI. Además, `onAddMediaItems` devolvía los mismos items sin resolver → doble error. El `currentExtractionJob` en background creaba una segunda resolución que competía con la primera.
+- **Flujo corregido**:
+  1. `onSetMediaItems` → retorna metadatos con artwork **instantáneamente** (future inmediato) → Android Auto abre la pantalla del reproductor al instante (0ms).
+  2. `onAddMediaItems` → resuelve URLs vía `YouTubeStreamResolver.resolveAudioUrls()` en `serviceScope` (paralelo, ~2-8s) → retorna items **con URIs válidas** → ExoPlayer puede crear `MediaSource` y reproducir.
+  3. Eliminado `currentExtractionJob` y toda la llamada directa a `player.setMediaItems()`/`player.prepare()`/`player.playWhenReady` dentro de `onSetMediaItems`.
+- **Shuffle en notificación**: `CustomNotificationProvider` (inner class que implementa `MediaNotification.Provider`) inyecta un `CommandButton` de shuffle en `mediaButtonPreferences` antes de delegar en `DefaultMediaNotificationProvider.createNotification()`. Se registra con `setMediaNotificationProvider(CustomNotificationProvider())` en `onCreate`.
+- **Shuffle en Android Auto**: `onConnect` construye `ConnectionResult` con `DEFAULT_SESSION_COMMANDS` + `DEFAULT_PLAYER_COMMANDS` (base) y añade `Player.COMMAND_SET_SHUFFLE_MODE` y `Player.COMMAND_GET_TIMELINE`. Un `Player.Listener` en el ExoPlayer actualiza `setCustomLayout()` con el ícono ON/OFF cada vez que cambia el modo shuffle.
+- **Limpieza**: eliminados imports muertos (`PendingIntent`, `NotificationCompat`, `IconCompat`, `SessionCommand`, `Job`), constante no usada (`AUDIO_EXTRACTION_TIMEOUT_MS`) y campo `currentExtractionJob`.
+- **Verificación**: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL (solo warnings preexistentes de `FOLDER_TYPE_PLAYLISTS` deprecated).
 - ~~Reproducción automática de la siguiente canción al terminar.~~ **Hecho y validado** (Iteración 6): `onVideoEnded` → `playNextTrack`/`playNextSavedTrack` → `loadVideoById` → siguiente canción, sin flood y sin saturar el main thread.
 - ~~Editar listas (título/descripción, toggle público).~~ **Hecho**.
 - ~~Modo de reproducción secuencial o aleatoria (shuffle).~~ **Hecho** (Iteración 7): selector en el reproductor de las listas con Shuffle (ON/OFF) y Repeat que cicla OFF → ALL → ONE.
@@ -457,3 +467,6 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - ~~Subir imagen de avatar/banner/photo (Firebase Storage).~~ **Hecho** (Iteración 9): `ProfileStorageRepository` (carpeta `profileImages/{uid}`), `HomeViewModel.uploadAvatar`/`uploadBanner` y portada/avatar tocables con photo picker y progreso de subida. Pendiente: definir **reglas de seguridad de Storage** (acceso al propietario).
 - **Reglas de seguridad de Firestore**: revisar y endurecer las reglas (búsqueda de `users`, `friend_requests`, subcolecciones `friends`/`savedCollections`) antes de publicar.
 - ~~Reglas de seguridad de Firebase Storage.~~ **Hecho**: limitar `profileImages/{uid}/...` a su propietario (auth.uid == uid).
+- ~~Android Auto: botón shuffle en notificación y salpicadero.~~ **Hecho** (Iteración 31): `CustomNotificationProvider` inyecta shuffle en la notificación del sistema; `onConnect` anuncia `COMMAND_SET_SHUFFLE_MODE` + `COMMAND_GET_TIMELINE` con `DEFAULT_PLAYER_COMMANDS`.
+- ~~Android Auto: latencia al abrir pantalla del reproductor.~~ **Hecho** (Iteración 31): `onSetMediaItems` retorna metadata instantáneamente (0ms); `onAddMediaItems` resuelve URLs en paralelo y retorna items con URI válida.
+- ~~Android Auto: duplicación de reproducción al pulsar canción.~~ **Hecho** (Iteración 31): eliminado `currentExtractionJob` y llamada directa a `player.setMediaItems()` en `onSetMediaItems` (causaba crash por items sin URI).

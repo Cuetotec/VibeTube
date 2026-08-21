@@ -1,8 +1,12 @@
 @file:OptIn(UnstableApi::class)
 package com.cuetotech.vibetube.player
 
+import android.app.PendingIntent
+import android.os.Bundle
 import android.net.Uri
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.graphics.drawable.IconCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -13,8 +17,10 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.MediaNotification
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSession.MediaItemsWithStartPosition
+import androidx.media3.session.SessionCommand
 import com.cuetotech.vibetube.data.AuthRepository
 import com.cuetotech.vibetube.data.PlaylistRepository
 import com.cuetotech.vibetube.data.Song
@@ -33,6 +39,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.media3.common.Player
 import androidx.media3.session.CommandButton
+import androidx.media3.session.DefaultMediaNotificationProvider
 import java.util.concurrent.ConcurrentHashMap
 
 
@@ -151,6 +158,62 @@ class PlaybackService : MediaLibraryService() {
         mediaLibrarySession = MediaLibrarySession.Builder(this, player, LibraryCallback())
             .setCustomLayout(listOf(shuffleButton))
             .build()
+
+        // Proveedor de notificaciones personalizado: inyecta el botón de
+        // shuffle en la notificación del sistema (lo que Android Auto proyecta).
+        // DefaultMediaNotificationProvider NO incluye shuffle por defecto.
+        setMediaNotificationProvider(CustomNotificationProvider())
+    }
+
+    /**
+     * Proveedor de notificaciones que extiende [DefaultMediaNotificationProvider]
+     * para añadir el botón de shuffle a la barra de controles de la notificación.
+     * Android Auto proyecta lo que ve en la notificación del sistema, así que
+     * al añadir shuffle aquí aparece automáticamente en el salpicadero.
+     */
+    private inner class CustomNotificationProvider : MediaNotification.Provider {
+        private val defaultProvider = DefaultMediaNotificationProvider(this@PlaybackService)
+
+        override fun createNotification(
+            mediaSession: MediaSession,
+            mediaButtonPreferences: ImmutableList<CommandButton>,
+            actionFactory: MediaNotification.ActionFactory,
+            onNotificationChangedCallback: MediaNotification.Provider.Callback,
+        ): MediaNotification {
+            // Inyecta el botón de shuffle en mediaButtonPreferences para que
+            // DefaultMediaNotificationProvider lo incluya en la notificación.
+            val player = mediaSession.player
+            val shuffleIcon = if (player?.shuffleModeEnabled == true) {
+                CommandButton.ICON_SHUFFLE_ON
+            } else {
+                CommandButton.ICON_SHUFFLE_OFF
+            }
+            val shuffleButton = CommandButton.Builder(shuffleIcon)
+                .setDisplayName("Aleatorio")
+                .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
+                .build()
+
+            val updatedPrefs = ImmutableList.builder<CommandButton>()
+                .add(shuffleButton)
+                .addAll(mediaButtonPreferences)
+                .build()
+
+            return defaultProvider.createNotification(
+                mediaSession,
+                updatedPrefs,
+                actionFactory,
+                onNotificationChangedCallback,
+            )
+        }
+
+        override fun handleCustomCommand(
+            session: MediaSession,
+            action: String,
+            extras: Bundle,
+        ): Boolean = defaultProvider.handleCustomCommand(session, action, extras)
+
+        override fun getNotificationChannelInfo(): MediaNotification.Provider.NotificationChannelInfo =
+            defaultProvider.notificationChannelInfo
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? =
@@ -347,35 +410,12 @@ class PlaybackService : MediaLibraryService() {
             if (alreadyResolved) {
                 return Futures.immediateFuture(mediaItems)
             }
-            // Si llegan ítems sin URIs (p. ej. de un controller externo),
-            // resuelve en paralelo usando el mismo mecanismo que onSetMediaItems.
-            currentExtractionJob?.cancel()
-            val settableFuture = SettableFuture.create<MutableList<MediaItem>>()
-            currentExtractionJob = serviceScope.launch {
-                try {
-                    val urls = YouTubeStreamResolver.resolveAudioUrls(
-                        mediaItems.map { item ->
-                            val (_, youtubeId) = splitMediaId(item.mediaId)
-                            youtubeId
-                        },
-                    )
-                    val resolved = mediaItems.mapIndexed { index, item ->
-                        val url = urls[index]
-                        if (url != null) {
-                            item.ensureArtwork().buildUpon()
-                                .setUri(Uri.parse(url))
-                                .build()
-                        } else {
-                            item.ensureArtwork()
-                        }
-                    }.toMutableList()
-                    settableFuture.set(resolved)
-                } catch (e: Exception) {
-                    Log.e(TAG_MEDIA, "onAddMediaItems: error resolviendo la cola", e)
-                    settableFuture.set(mediaItems)
-                }
-            }
-            return settableFuture
+            // NUNCA bloquear aquí en YouTubeStreamResolver. La resolución de
+            // audio corre en background dentro de onSetMediaItems y aplica los
+            // ítems resueltos directamente vía player.setMediaItems().
+            // Devolvemos los ítems con metadatos para que la UI del coche se
+            // mantenga visible mientras el audio se resuelve en background.
+            return Futures.immediateFuture(mediaItems)
         }
 
         override fun onSetMediaItems(

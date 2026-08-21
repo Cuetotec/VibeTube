@@ -123,17 +123,26 @@ class PlaybackService : MediaLibraryService() {
         // pulsar una canción en Android Auto, el reproductor arranca solo.
         player.playWhenReady = true
 
-        // Listener de shuffle: cuando Android Auto activa/desactiva shuffle,
-        // reordena la cola real del ExoPlayer para que la reproducción sea
-        // efectivamente aleatoria (sin esto, ExoPlayer solo cambia el flag
-        // pero no reordena, y Android Auto oculta el botón).
+        // Listener de shuffle: actualiza dinámicamente el ícono de la
+        // notificación y Android Auto entre ON/OFF según el estado.
         player.addListener(object : Player.Listener {
             override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                player.setShuffleModeEnabled(shuffleModeEnabled)
+                val icon = if (shuffleModeEnabled) {
+                    CommandButton.ICON_SHUFFLE_ON
+                } else {
+                    CommandButton.ICON_SHUFFLE_OFF
+                }
+                val shuffleButton = CommandButton.Builder(icon)
+                    .setDisplayName("Aleatorio")
+                    .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
+                    .build()
+                mediaLibrarySession?.setCustomLayout(listOf(shuffleButton))
             }
         })
 
-        // Inicialización de la sesión multimedia para android auto
+        // Botón de shuffle para la notificación y Android Auto.
+        // setCustomLayout alimenta la MediaNotificationProvider (barra de
+        // controles de la notificación) y Android Auto lo proyecta en su UI.
         val shuffleButton = CommandButton.Builder(CommandButton.ICON_SHUFFLE_OFF)
             .setDisplayName("Aleatorio")
             .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
@@ -387,19 +396,26 @@ class PlaybackService : MediaLibraryService() {
                 )
             }
 
-            val settableFuture = SettableFuture.create<MediaItemsWithStartPosition>()
+            // Sin URI → es una llamada de Android Auto con mediaId
+            // "playlistId:youtubeId". Extraemos la lista y devolvemos
+            // metadatos INMEDIATAMENTE para que la UI del coche se abra
+            // al instante (0s). La resolución de audio corre en background
+            // y se aplica vía onAddMediaItems cuando esté lista.
+            val (playlistId, selectedYoutubeId) = splitMediaId(
+                mediaItems.firstOrNull()?.mediaId.orEmpty(),
+            )
 
-            currentExtractionJob = serviceScope.launch {
-                try {
-                    val (playlistId, selectedYoutubeId) = splitMediaId(
-                        mediaItems.firstOrNull()?.mediaId.orEmpty(),
-                    )
-
-                    if (playlistId != null) {
+            if (playlistId != null) {
+                // Lanzamos la carga de Firestore + extracción en background.
+                // NO bloqueamos el future: se resuelve ya con metadatos para
+                // que Android Auto muestre la cola al instante.
+                currentExtractionJob?.cancel()
+                currentExtractionJob = serviceScope.launch {
+                    try {
                         val songs = playlistRepository.getPlaylist(playlistId)?.tracks.orEmpty()
                         Log.d(
                             TAG_MEDIA,
-                            "onSetMediaItems($playlistId): ${songs.size} canciones en la cola",
+                            "onSetMediaItems($playlistId): ${songs.size} canciones en la cola (background)",
                         )
 
                         val selectedIndex = songs.indexOfFirst { it.youtubeId == selectedYoutubeId }
@@ -408,10 +424,7 @@ class PlaybackService : MediaLibraryService() {
 
                         val allItems = songs.map { it.asMediaItem(playlistId) }
 
-                        // Resolución paralela de URLs de audio: usa el mismo
-                        // mecanismo que el teléfono (resolveAudioUrls) con
-                        // semáforo de 4 concurrencias. Mucho más rápido que la
-                        // resolución secuencial anterior (1 canción a la vez).
+                        // Resolución paralela de URLs de audio en background
                         val urls = YouTubeStreamResolver.resolveAudioUrls(
                             songs.map { it.youtubeId },
                         )
@@ -434,22 +447,31 @@ class PlaybackService : MediaLibraryService() {
                             "onSetMediaItems($playlistId): ${urls.count { it != null }}/${songs.size} pistas con audio resuelto",
                         )
 
-                        settableFuture.set(
-                            MediaItemsWithStartPosition(resolvedItems, selectedIndex, 0L),
-                        )
-                    } else {
-                        settableFuture.set(
-                            MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs),
-                        )
+                        // Aplica la cola resuelta al reproductor cuando las
+                        // URLs estén listas (ExoPlayer ya tiene metadatos
+                        // visibles en Android Auto desde el future anterior).
+                        mediaLibrarySession?.player?.let { player ->
+                            player.setMediaItems(resolvedItems, selectedIndex, 0L)
+                            player.prepare()
+                            player.playWhenReady = true
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG_MEDIA, "onSetMediaItems: error resolviendo en background", e)
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG_MEDIA, "onSetMediaItems: error montando la cola", e)
-                    settableFuture.set(
-                        MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs),
-                    )
                 }
+
+                // Devuelve metadatos al instante: Android Auto abre la
+                // pantalla de reproducción sin esperar la extracción.
+                val metadataItems = mediaItems.map { it.ensureArtwork() }
+                return Futures.immediateFuture(
+                    MediaItemsWithStartPosition(metadataItems, startIndex, startPositionMs),
+                )
             }
-            return settableFuture
+
+            // Fuera de formato Android Auto: passthrough directo
+            return Futures.immediateFuture(
+                MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs),
+            )
         }
 
         override fun onGetChildren(

@@ -479,3 +479,12 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - ~~Android Auto: botón shuffle en notificación y salpicadero.~~ **Hecho** (Iteración 31): `CustomNotificationProvider` inyecta shuffle en la notificación del sistema; `onConnect` anuncia `COMMAND_SET_SHUFFLE_MODE` + `COMMAND_GET_TIMELINE` con `DEFAULT_PLAYER_COMMANDS`.
 - ~~Android Auto: latencia al abrir pantalla del reproductor.~~ **Hecho** (Iteración 31): `onSetMediaItems` retorna metadata instantáneamente (0ms); `onAddMediaItems` resuelve URLs en paralelo y retorna items con URI válida.
 - ~~Android Auto: duplicación de reproducción al pulsar canción.~~ **Hecho** (Iteración 31): eliminado `currentExtractionJob` y llamada directa a `player.setMediaItems()` en `onSetMediaItems` (causaba crash por items sin URI).
+
+### Iteración 33 — Estado del shuffle y verificación pendiente (24-08-2026)
+- **Shuffle button: implementación completa**. El código del botón de shuffle ya está en su totalidad en su sitio:
+  - `PlaybackService.kt`: `setCustomLayout(listOf(shuffleButton))` (línea 144) registra el botón con la sesión Media3.
+  - `CustomNotificationProvider` (líneas 159-202): extiende `MediaNotification.Provider` y inyecta el `CommandButton` de shuffle en `mediaButtonPreferences` antes de delegar en `DefaultMediaNotificationProvider.createNotification()`.
+  - `Player.Listener.onShuffleModeEnabledChanged` (líneas 120-132): actualiza dinámicamente el ícono ON/OFF en `setCustomLayout()` cada vez que cambia el modo shuffle.
+  - `onConnect` (líneas 372-384): expone `COMMAND_SET_SHUFFLE_MODE` + `COMMAND_GET_TIMELINE` en `availablePlayerCommands` para que Android Auto dibuje el botón.
+  - `PlaylistsViewModel.toggleShuffle()` (línea 319) + UI `PlaylistsScreen` (línea 666): botón visible en la pantalla del reproductor del teléfono.
+- **Pendiente de verificación en dispositivo real**: el usuario reportó que el botón shuffle no era visible en Android Auto. La causa más probable es que el APK con los últimos cambios no estaba instalado en el móvil al probar en el coche. **Siguiente paso**: instalar el APK más reciente (`ba31166`) y probar de nuevo en Android Auto.

@@ -458,14 +458,53 @@ class PlaybackService : MediaLibraryService() {
             }
 
             // Sin URI → es una llamada de Android Auto con mediaId
-            // "playlistId:youtubeId". Devolvemos metadatos con artwork para que
-            // Android Auto abra la pantalla del reproductor al instante.
-            // La resolución de URLs ocurre en onAddMediaItems (el framework la
-            // llama automáticamente después de onSetMediaItems).
-            val metadataItems = mediaItems.map { it.ensureArtwork() }
-            return Futures.immediateFuture(
-                MediaItemsWithStartPosition(metadataItems, startIndex, startPositionMs),
-            )
+            // "playlistId:youtubeId". Resolvemos las URLs de audio en paralelo
+            // ANTES de devolver los ítems: ExoPlayer REQUIERE que cada ítem
+            // tenga una URI para poder crear el MediaSource.
+            val settableFuture = SettableFuture.create<MediaItemsWithStartPosition>()
+            serviceScope.launch {
+                try {
+                    val youtubeIds = mediaItems.map { item ->
+                        val (_, ytId) = splitMediaId(item.mediaId)
+                        ytId
+                    }
+
+                    Log.d(TAG_MEDIA, "onSetMediaItems: resolviendo ${youtubeIds.size} URLs")
+                    val urls = YouTubeStreamResolver.resolveAudioUrls(youtubeIds)
+
+                    val resolvedItems = mediaItems.mapIndexed { index, item ->
+                        val url = urls[index]
+                        if (url != null) {
+                            val (_, ytId) = splitMediaId(item.mediaId)
+                            urlCache[ytId] = url
+                            item.ensureArtwork().buildUpon()
+                                .setUri(Uri.parse(url))
+                                .build()
+                        } else {
+                            Log.w(TAG_MEDIA, "onSetMediaItems: sin audio para ${youtubeIds[index]}")
+                            item.ensureArtwork()
+                        }
+                    }
+
+                    Log.d(
+                        TAG_MEDIA,
+                        "onSetMediaItems: ${urls.count { it != null }}/${youtubeIds.size} pistas resueltas",
+                    )
+                    settableFuture.set(
+                        MediaItemsWithStartPosition(resolvedItems, startIndex, startPositionMs),
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG_MEDIA, "onSetMediaItems: error resolviendo URLs", e)
+                    settableFuture.set(
+                        MediaItemsWithStartPosition(
+                            mediaItems.map { it.ensureArtwork() },
+                            startIndex,
+                            startPositionMs,
+                        ),
+                    )
+                }
+            }
+            return settableFuture
         }
 
         override fun onGetChildren(

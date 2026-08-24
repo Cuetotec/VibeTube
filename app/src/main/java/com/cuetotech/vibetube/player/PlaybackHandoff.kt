@@ -14,7 +14,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 
 private const val TAG = "VibeTubeHandoff"
 
@@ -151,21 +155,56 @@ class PlaybackHandoff(
 
     /**
      * Transición a segundo plano (pantalla apagada o app en segundo plano):
-     * pausa y silencia el WebView, y el servicio reanuda desde su posición
-     * actual (ExoPlayer conserva la posición al pausar en primer plano).
-     * No se lee la posición del WebView: la Evaluación JS es lenta y puede
-     * bloquear cuando el sistema está apagando la pantalla.
+     * espera a que el servicio esté listo (syncPlaylist resolviendo URLs),
+     * captura la posición del WebView, pausa y silencia el WebView, y el
+     * servicio reanuda DESDE la posición exacta del WebView.
      */
     private suspend fun handOffToService() {
+        // Si el servicio no está activo aún (syncPlaylist en curso), esperar
+        // a que termine la resolución de URLs (máx 30s).
         if (!playbackController.isActive.value) {
-            Log.d(TAG, "handOffToService: sin sesión en el servicio, se omite")
+            Log.d(TAG, "handOffToService: servicio no activo, esperando resolución...")
+            withTimeoutOrNull(30_000L) {
+                playbackController.isActive.first { it }
+            }
+        }
+        if (!playbackController.isActive.value) {
+            Log.d(TAG, "handOffToService: sin sesión en el servicio tras espera, se omite")
             return
         }
-        Log.d(TAG, "handOffToService: segundo plano, delegando el audio al servicio")
+
+        // Captura la posición del WebView ANTES de pausarlo, con timeout
+        // corto para no bloquear el handoff si la evaluación JS es lenta.
+        val position = readWebPositionWithTimeout()
+        Log.d(TAG, "handOffToService: posición WebView=${position}ms")
+
         webPlayer.pause()
         webPlayer.setMuted(true)
-        playbackController.play()
+
+        // Seek al servicio a la posición del WebView para que la canción
+        // continúe desde donde estaba, no desde el principio.
+        if (position != null && position > 0) {
+            playbackController.playFromPosition(position)
+        } else {
+            playbackController.play()
+        }
     }
+
+    /**
+     * Lee la posición del WebView con un timeout corto. Si la evaluación JS
+     * tarda demasiado (pantalla apagándose), devuelve null y el servicio
+     * arranca desde la posición que tenía (generalmente 0 o la última seek).
+     */
+    private suspend fun readWebPositionWithTimeout(): Long? =
+        withTimeoutOrNull(1_500L) {
+            suspendCancellableCoroutine { continuation ->
+                webPlayer.currentPosition { position ->
+                    if (continuation.isActive) {
+                        continuation.resume(position)
+                    }
+                }
+            }
+        }
 
     /**
      * Transición a primer plano (pantalla encendida y app visible):

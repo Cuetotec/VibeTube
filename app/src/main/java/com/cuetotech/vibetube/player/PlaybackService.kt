@@ -25,6 +25,7 @@ import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -66,7 +67,10 @@ class PlaybackService : MediaLibraryService() {
     private var mediaLibrarySession: MediaLibrarySession? = null
 
     private val serviceJob = SupervisorJob()
-    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
+    private val serviceExceptionHandler = CoroutineExceptionHandler { _, exception ->
+        Log.e(TAG_MEDIA, "serviceScope: excepción no capturada", exception)
+    }
+    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob + serviceExceptionHandler)
 
     // Caché de URLs de audio resueltas (youtubeId → audioUrl): evita re-extractar
     // la misma canción si el usuario pulsa dos veces sobre ella.
@@ -85,69 +89,75 @@ class PlaybackService : MediaLibraryService() {
     private var lastRootChildrenCount = 0
 
     override fun onCreate() {
-        super.onCreate()
+        try {
+            super.onCreate()
 
-        // Configuración de red del reproductor
-        val dataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(STREAM_USER_AGENT)
-            .setAllowCrossProtocolRedirects(true)
+            // Configuración de red del reproductor
+            val dataSourceFactory = DefaultHttpDataSource.Factory()
+                .setUserAgent(STREAM_USER_AGENT)
+                .setAllowCrossProtocolRedirects(true)
 
-        // Construcción de Exoplayer
-        val player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(
-                DefaultMediaSourceFactory(this)
-                    .setDataSourceFactory(dataSourceFactory),
+            // Construcción de Exoplayer
+            val player = ExoPlayer.Builder(this)
+                .setMediaSourceFactory(
+                    DefaultMediaSourceFactory(this)
+                        .setDataSourceFactory(dataSourceFactory),
+                )
+                .build()
+
+            // Configuración de comportamiento de audio y WakeLock
+            player.setWakeMode(C.WAKE_MODE_NETWORK)
+            player.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                /* handleAudioFocus = */ true
             )
-            .build()
+            player.setHandleAudioBecomingNoisy(true)
 
-        // Configuración de comportamiento de audio y WakeLock
-        player.setWakeMode(C.WAKE_MODE_NETWORK)
-        player.setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(C.USAGE_MEDIA)
-                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                .build(),
-            /* handleAudioFocus = */ true
-        )
-        player.setHandleAudioBecomingNoisy(true)
+            // Reproducción automática en cuanto la sesión reciba una cola: al
+            // pulsar una canción en Android Auto, el reproductor arranca solo.
+            player.playWhenReady = true
 
-        // Reproducción automática en cuanto la sesión reciba una cola: al
-        // pulsar una canción en Android Auto, el reproductor arranca solo.
-        player.playWhenReady = true
-
-        // Listener de shuffle: actualiza dinámicamente el ícono de la
-        // notificación y Android Auto entre ON/OFF según el estado.
-        player.addListener(object : Player.Listener {
-            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
-                val icon = if (shuffleModeEnabled) {
-                    CommandButton.ICON_SHUFFLE_ON
-                } else {
-                    CommandButton.ICON_SHUFFLE_OFF
+            // Listener de shuffle: actualiza dinámicamente el ícono de la
+            // notificación y Android Auto entre ON/OFF según el estado.
+            player.addListener(object : Player.Listener {
+                override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                    val icon = if (shuffleModeEnabled) {
+                        CommandButton.ICON_SHUFFLE_ON
+                    } else {
+                        CommandButton.ICON_SHUFFLE_OFF
+                    }
+                    val shuffleButton = CommandButton.Builder(icon)
+                        .setDisplayName("Aleatorio")
+                        .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
+                        .build()
+                    mediaLibrarySession?.setCustomLayout(listOf(shuffleButton))
                 }
-                val shuffleButton = CommandButton.Builder(icon)
-                    .setDisplayName("Aleatorio")
-                    .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
-                    .build()
-                mediaLibrarySession?.setCustomLayout(listOf(shuffleButton))
-            }
-        })
+            })
 
-        // Botón de shuffle para la notificación y Android Auto.
-        // setCustomLayout alimenta la MediaNotificationProvider (barra de
-        // controles de la notificación) y Android Auto lo proyecta en su UI.
-        val shuffleButton = CommandButton.Builder(CommandButton.ICON_SHUFFLE_OFF)
-            .setDisplayName("Aleatorio")
-            .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
-            .build()
+            // Botón de shuffle para la notificación y Android Auto.
+            // setCustomLayout alimenta la MediaNotificationProvider (barra de
+            // controles de la notificación) y Android Auto lo proyecta en su UI.
+            val shuffleButton = CommandButton.Builder(CommandButton.ICON_SHUFFLE_OFF)
+                .setDisplayName("Aleatorio")
+                .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
+                .build()
 
-        mediaLibrarySession = MediaLibrarySession.Builder(this, player, LibraryCallback())
-            .setCustomLayout(listOf(shuffleButton))
-            .build()
+            // Proveedor de notificaciones personalizado: inyecta el botón de
+            // shuffle en la notificación del sistema (lo que Android Auto proyecta).
+            // DefaultMediaNotificationProvider NO incluye shuffle por defecto.
+            // IMPORTANTE: debe registrarse ANTES de construir la sesión para que
+            // MediaLibraryService lo encuentre al crear la notificación interna.
+            setMediaNotificationProvider(CustomNotificationProvider())
 
-        // Proveedor de notificaciones personalizado: inyecta el botón de
-        // shuffle en la notificación del sistema (lo que Android Auto proyecta).
-        // DefaultMediaNotificationProvider NO incluye shuffle por defecto.
-        setMediaNotificationProvider(CustomNotificationProvider())
+            mediaLibrarySession = MediaLibrarySession.Builder(this, player, LibraryCallback())
+                .setCustomLayout(listOf(shuffleButton))
+                .build()
+        } catch (e: Exception) {
+            Log.e(TAG_MEDIA, "PlaybackService: error en onCreate", e)
+        }
     }
 
     /**
@@ -165,30 +175,40 @@ class PlaybackService : MediaLibraryService() {
             actionFactory: MediaNotification.ActionFactory,
             onNotificationChangedCallback: MediaNotification.Provider.Callback,
         ): MediaNotification {
-            // Inyecta el botón de shuffle en mediaButtonPreferences para que
-            // DefaultMediaNotificationProvider lo incluya en la notificación.
-            val player = mediaSession.player
-            val shuffleIcon = if (player?.shuffleModeEnabled == true) {
-                CommandButton.ICON_SHUFFLE_ON
-            } else {
-                CommandButton.ICON_SHUFFLE_OFF
+            return try {
+                // Inyecta el botón de shuffle en mediaButtonPreferences para que
+                // DefaultMediaNotificationProvider lo incluya en la notificación.
+                val player = mediaSession.player
+                val shuffleIcon = if (player?.shuffleModeEnabled == true) {
+                    CommandButton.ICON_SHUFFLE_ON
+                } else {
+                    CommandButton.ICON_SHUFFLE_OFF
+                }
+                val shuffleButton = CommandButton.Builder(shuffleIcon)
+                    .setDisplayName("Aleatorio")
+                    .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
+                    .build()
+
+                val updatedPrefs = ImmutableList.builder<CommandButton>()
+                    .add(shuffleButton)
+                    .addAll(mediaButtonPreferences)
+                    .build()
+
+                defaultProvider.createNotification(
+                    mediaSession,
+                    updatedPrefs,
+                    actionFactory,
+                    onNotificationChangedCallback,
+                )
+            } catch (e: Exception) {
+                Log.e(TAG_MEDIA, "CustomNotificationProvider: error creando notificación, usando default", e)
+                defaultProvider.createNotification(
+                    mediaSession,
+                    mediaButtonPreferences,
+                    actionFactory,
+                    onNotificationChangedCallback,
+                )
             }
-            val shuffleButton = CommandButton.Builder(shuffleIcon)
-                .setDisplayName("Aleatorio")
-                .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
-                .build()
-
-            val updatedPrefs = ImmutableList.builder<CommandButton>()
-                .add(shuffleButton)
-                .addAll(mediaButtonPreferences)
-                .build()
-
-            return defaultProvider.createNotification(
-                mediaSession,
-                updatedPrefs,
-                actionFactory,
-                onNotificationChangedCallback,
-            )
         }
 
         override fun handleCustomCommand(

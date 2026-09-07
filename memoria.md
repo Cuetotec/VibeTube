@@ -497,3 +497,17 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **Fix 3 — Try-catch + fallback en `CustomNotificationProvider.createNotification()`**: si el `DefaultMediaNotificationProvider` lanza una excepción al crear la notificación con el shuffle inyectado, se hace fallback al provider por defecto sin shuffle en lugar de matar el servicio.
 - **Fix 4 — `CoroutineExceptionHandler` en `serviceScope`**: se añade un handler que captura excepciones no controladas en corrutinas del servicio (p.ej. en `onGetChildren`, `onSetMediaItems`, `onAddMediaItems`) y las registra en logcat en lugar de-crashear el proceso.
 - Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL (solo warnings preexistentes de `FOLDER_TYPE_PLAYLISTS`).
+
+### Iteración 35 — Rewrite completo: PlaybackService 100% asíncrono + fix notificación shuffle (25-08-2026)
+- **Diagnóstico de los 3 problemas**:
+  1. **I/O bloqueando el hilo principal**: `onCreate()`, `onGetSession()`, `onGetLibraryRoot()` NO bloquean (operaciones en memoria). El problema era `onGetChildren()` que lanzaba corutinas en `Dispatchers.Main` para Firestore — ahora usa `withContext(Dispatchers.IO)` explícito.
+  2. **MediaLibrarySession build time**: `MediaLibrarySession.Builder.build()` es síncrono pero rápido (<100ms), no es el problema.
+  3. **CustomNotificationProvider no mapeaba shuffle**: `DefaultMediaNotificationProvider.createNotification()` es `final` en Media3 1.10.1 — no se puede subclasificar. El `setCompactViewActionIndices` (método protected) tampoco existe. Se implementa `MediaNotification.Provider` desde cero con wrapper, delegando en `DefaultMediaNotificationProvider` e inyectando el shuffle button en `mediaButtonPreferences`.
+- **Cambios en la reescritura**:
+  - `onGetChildren`: `withContext(Dispatchers.IO)` para queries Firestore (`getUserPlaylists`, `getPlaylist`).
+  - `onSetMediaItems`: `withContext(Dispatchers.IO)` para `YouTubeStreamResolver.resolveAudioUrls()`. Resuelve la canción seleccionada primero, responde inmediatamente a ExoPlayer/Auto, y resuelve el resto en background.
+  - `CustomNotificationProvider`: implementa `MediaNotification.Provider` (no subclasifica), delega en `DefaultMediaNotificationProvider` con shuffle button inyectado en `mediaButtonPreferences`, con try-catch + fallback al provider por defecto.
+  - `CoroutineExceptionHandler` en `serviceScope` para capturar excepciones no controladas.
+  - `setMediaNotificationProvider()` llamado ANTES de construir la sesión.
+  - `onConnect`: expone `COMMAND_SET_SHUFFLE_MODE`, `COMMAND_GET_TIMELINE`, `COMMAND_PLAY_PAUSE`, `COMMAND_SEEK_TO_NEXT`, `COMMAND_SEEK_TO_PREVIOUS`.
+- Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL (solo warnings preexistentes).

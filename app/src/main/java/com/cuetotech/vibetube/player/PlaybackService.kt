@@ -35,7 +35,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 private const val STREAM_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
@@ -69,6 +74,11 @@ class PlaybackService : MediaLibraryService() {
         CoroutineScope(Dispatchers.Main + serviceJob + serviceExceptionHandler)
 
     private val urlCache = ConcurrentHashMap<String, String>()
+    private val artworkCache = ConcurrentHashMap<String, ByteArray>()
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .build()
     private val authRepository = AuthRepository()
     private val playlistRepository = PlaylistRepository()
 
@@ -242,6 +252,43 @@ class PlaybackService : MediaLibraryService() {
         else null to mediaId
     }
 
+    /**
+     * Descarga los bytes de la portada desde una URL remota (en `Dispatchers.IO`)
+     * y los cachea por youtubeId. Devuelve null si falla la descarga.
+     */
+    private suspend fun fetchArtworkData(youtubeId: String, imageUrl: String): ByteArray? {
+        if (imageUrl.isBlank()) return null
+        artworkCache[youtubeId]?.let { return it }
+        val bytes = withContext(Dispatchers.IO) {
+            val request = Request.Builder().url(imageUrl).build()
+            try {
+                httpClient.newCall(request).execute().use { response: Response ->
+                    if (response.isSuccessful) {
+                        response.body?.bytes()
+                    } else {
+                        Log.w(TAG_MEDIA, "fetchArtworkData: HTTP ${response.code} para $imageUrl")
+                        null
+                    }
+                }
+            } catch (e: IOException) {
+                Log.w(TAG_MEDIA, "fetchArtworkData: error descargando $imageUrl", e)
+                null
+            }
+        }
+        if (bytes != null) artworkCache[youtubeId] = bytes
+        return bytes
+    }
+
+    /** Devuelve el [MediaItem] con el artwork embebido (artworkData) si está disponible. */
+    private fun withArtwork(item: MediaItem, youtubeId: String): MediaItem {
+        val artwork = artworkCache[youtubeId] ?: return item
+        val metadata = item.mediaMetadata
+            .buildUpon()
+            .setArtworkData(artwork, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+            .build()
+        return item.buildUpon().setMediaMetadata(metadata).build()
+    }
+
     // ──────────────────────────────────────────────────────────────
     //  LibraryCallback — TODOS los callbacks son async o instantáneos
     // ──────────────────────────────────────────────────────────────
@@ -280,8 +327,13 @@ class PlaybackService : MediaLibraryService() {
                 TAG_MEDIA,
                 "onConnect: client=${controller.packageName} uid=${controller.uid}",
             )
+            // IMPORTANTE: usar DEFAULT_SESSION_AND_LIBRARY_COMMANDS. Incluye las
+            // library commands (COMMAND_CODE_LIBRARY_GET_LIBRARY_ROOT, etc.) que
+            // SystemUI/MediaBrowserCompat necesitan para resolver el root vía la
+            // API legacy. Si solo se exponen las session commands, SystemUI recibe
+            // "No root for client com.android.systemui".
             val sessionCommands =
-                MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon().build()
+                MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
             val playerCommands =
                 MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
                     .add(Player.COMMAND_SET_SHUFFLE_MODE)
@@ -322,19 +374,30 @@ class PlaybackService : MediaLibraryService() {
                         if (url != null) urlCache[targetYtId] = url
                     }
 
-                    // 2. Preparar items con URIs disponibles
-                    val prepared = mediaItems.mapIndexed { index, item ->
-                        val cached = urlCache[youtubeIds[index]]
-                        if (cached != null) item.buildUpon().setUri(Uri.parse(cached)).build()
-                        else item
+                    // 2. Descargar y cachear la portada de la canción seleccionada
+                    val targetItem = mediaItems[targetIndex]
+                    val targetImageUrl = targetItem.mediaMetadata.artworkUri?.toString().orEmpty()
+                    if (artworkCache[targetYtId] == null && targetImageUrl.isNotBlank()) {
+                        fetchArtworkData(targetYtId, targetImageUrl)
                     }
 
-                    // 3. Responder a ExoPlayer/Auto inmediatamente
+                    // 3. Preparar items con URIs y artwork disponibles
+                    val prepared = mediaItems.mapIndexed { index, item ->
+                        val cached = urlCache[youtubeIds[index]]
+                        val withUrl = if (cached != null) {
+                            item.buildUpon().setUri(Uri.parse(cached)).build()
+                        } else {
+                            item
+                        }
+                        withArtwork(withUrl, youtubeIds[index])
+                    }
+
+                    // 4. Responder a ExoPlayer/Auto inmediatamente
                     settableFuture.set(
                         MediaItemsWithStartPosition(prepared, targetIndex, startPositionMs),
                     )
 
-                    // 4. Resolver el resto en background (IO)
+                    // 5. Resolver el resto en background (IO)
                     val remaining = youtubeIds.filterIndexed { i, id ->
                         i != targetIndex && !urlCache.containsKey(id)
                     }
@@ -407,8 +470,25 @@ class PlaybackService : MediaLibraryService() {
                             val playlist = withContext(Dispatchers.IO) {
                                 playlistRepository.getPlaylist(parentId)
                             }
-                            val songs = playlist?.tracks.orEmpty()
-                                .map { it.asMediaItem(parentId) }
+                            val rawSongs = playlist?.tracks.orEmpty()
+                            // Descarga y cachea las portadas (paralelo/IO) antes de servirlas.
+                            val artworkByYt = rawSongs.associateWith { song ->
+                                fetchArtworkData(song.youtubeId, song.imageUrl)
+                            }
+                            val songs = rawSongs.map { song ->
+                                song.asMediaItem(parentId).let { item ->
+                                    val artwork = artworkByYt[song]
+                                    if (artwork != null) {
+                                        val metadata = item.mediaMetadata
+                                            .buildUpon()
+                                            .setArtworkData(artwork, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                                            .build()
+                                        item.buildUpon().setMediaMetadata(metadata).build()
+                                    } else {
+                                        item
+                                    }
+                                }
+                            }
                             Log.d(TAG_MEDIA, "onGetChildren($parentId): ${songs.size} canciones")
                             ImmutableList.copyOf(songs)
                         }

@@ -521,3 +521,17 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
   1. **Manifest limpiado**: eliminado `<category android:name="android.intent.category.DEFAULT" />` (innecesario para servicios y potencialmente confuso para `MediaBrowserCompat` clients). Eliminada acción redundante `androidx.media3.session.MediaSessionService` (ya cubierta por `MediaLibraryService`). Solo quedan `android.media.browse.MediaBrowserService` + `androidx.media3.session.MediaLibraryService`.
   2. **Logging en callbacks**: `onGetLibraryRoot()` y `onConnect()` ahora logean `client.packageName` y `client.uid` para diagnosticar qué clientes se conectan y cuándo.
 - Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.
+
+### Iteración 37 — Fix definitivo SystemUI "No root" (library commands) + artworkData (07-09-2026)
+- **Causa raíz REAL de "No root for client com.android.systemui"**:
+  - `MediaLibraryServiceLegacyStub.onGetRoot()` (path `MediaBrowserServiceCompat`, usado por SystemUI/`MediaResumeListener`) exige que la conexión tenga disponible la session command `COMMAND_CODE_LIBRARY_GET_LIBRARY_ROOT`. Si no está disponible → retorna null → SystemUI recibe "No root for client".
+  - Nuestro `onConnect` construía `MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS` (solo session commands, SIN las library commands). Por eso fallaba.
+  - **Fix**: `onConnect` ahora usa `MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS` (incluye `addAllLibraryCommands()` + `addAllSessionCommands()`).
+- **Artwork fix (SystemUI rechazaba URLs HTTPS directas en artworkUri)**:
+  - SystemUI/`MediaDataLoader` loguea `Invalid album art uri [https://i.ytimg.com/...]` cuando el metadata lleva `setArtworkUri(URL)` en lugar de bytes embebidos.
+  - **Fix**: se descargan los bytes de la portada con OkHttp (5.4.0, ya disponible) en `Dispatchers.IO`, se cachean en `artworkCache` (por youtubeId/mediaId), y se insertan en el metadata con `setArtworkData(bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)`.
+  - Nuevos helpers en `PlaybackService`: `fetchArtworkData(youtubeId, imageUrl)` (descarga+cache) y `withArtwork(item, youtubeId)` (rebuild del MediaItem con artworkData).
+  - `onSetMediaItems`: descarga la portada de la canción seleccionada (antes de responder) y aplica `withArtwork` a todos los items.
+  - `onGetChildren` (browse Android Auto): descarga las portadas de las canciones de la lista y las embebe en el metadata.
+  - `PlaybackController.buildMediaItem` sigue pasando `setArtworkUri` (la URL), pero `PlaybackService` la descarga y la convierte en `artworkData` antes de entregarla a ExoPlayer/SystemUI. `MediaMetadata.setArtworkData(byte[])` está deprecado → se usa la versión de 2 args `setArtworkData(byte[], pictureType)`.
+- Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL (solo warning preexistente `FOLDER_TYPE_PLAYLISTS`).

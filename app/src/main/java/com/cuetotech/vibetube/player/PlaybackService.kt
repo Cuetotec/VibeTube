@@ -254,6 +254,10 @@ class PlaybackService : MediaLibraryService() {
             browser: MediaSession.ControllerInfo,
             params: LibraryParams?,
         ): ListenableFuture<LibraryResult<MediaItem>> {
+            Log.d(
+                TAG_MEDIA,
+                "onGetLibraryRoot: client=${browser.packageName} uid=${browser.uid}",
+            )
             val rootItem = MediaItem.Builder()
                 .setMediaId(ROOT_ID)
                 .setMediaMetadata(
@@ -272,6 +276,10 @@ class PlaybackService : MediaLibraryService() {
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
         ): MediaSession.ConnectionResult {
+            Log.d(
+                TAG_MEDIA,
+                "onConnect: client=${controller.packageName} uid=${controller.uid}",
+            )
             val sessionCommands =
                 MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon().build()
             val playerCommands =

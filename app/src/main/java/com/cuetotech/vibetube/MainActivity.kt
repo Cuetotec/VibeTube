@@ -17,13 +17,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Home
@@ -71,31 +72,24 @@ private const val LOGIN_ERROR_TAG = "LOGIN_ERROR"
 
 class MainActivity : ComponentActivity() {
 
-    // Android 13+: solicita el permiso de notificaciones para que la notificación
-    // multimedia (reproducción en segundo plano) sea visible en el centro de
-    // control y en la pantalla de bloqueo.
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { /* el resultado no bloquea la reproducción */ }
+    ) { /* El resultado no bloquea la reproducción */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         try {
-            // Instala la Splash Screen compatible (Android 12+ usa la API del
-            // sistema; en versiones anteriores se emula con Theme.SplashScreen).
-            // Debe llamarse antes de super.onCreate().
             installSplashScreen()
             super.onCreate(savedInstanceState)
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
+
             enableEdgeToEdge(
                 statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
                 navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             )
-            // Navegación inicial (Login <-> pantalla principal) protegida: si
-            // cualquier excepción escapa durante la composición inicial, se
-            // registra en logcat (LOGIN_ERROR) y se muestra una pantalla de
-            // error en vez de cerrar la app.
+
             setContent {
                 VibeTubeTheme {
                     MainScreen()
@@ -145,6 +139,7 @@ private fun MainScreen() {
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        contentWindowInsets = WindowInsets.systemBars, // Evita colisión con barras del sistema
         bottomBar = {
             NavigationBar {
                 AppTab.entries.forEach { tab ->
@@ -184,8 +179,6 @@ private fun MainScreen() {
     val editingPlaylist by playlistsViewModel.editingPlaylist.collectAsState()
     val toastMessage by playlistsViewModel.toastMessage.collectAsState()
 
-    // Toast directo con el error de Firestore al añadir canciones: muestra el
-    // mensaje real (reglas de seguridad, red, etc.) y limpia el evento.
     val context = LocalContext.current
     LaunchedEffect(toastMessage) {
         toastMessage?.let { message ->
@@ -442,13 +435,14 @@ private fun UrlDialog(
     var selectedPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isProcessing) onDismiss() },
         title = { Text(stringResource(R.string.url_dialog_title)) },
         text = {
             Column {
                 OutlinedTextField(
                     value = urlText,
                     onValueChange = { urlText = it },
+                    enabled = !isProcessing, // Bloqueado mientras descarga/procesa
                     label = { Text(stringResource(R.string.url_dialog_field_label)) },
                     placeholder = { Text(stringResource(R.string.url_dialog_field_placeholder)) },
                     singleLine = false,
@@ -473,11 +467,12 @@ private fun UrlDialog(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { selectedPlaylistId = playlist.id },
+                                    .clickable(enabled = !isProcessing) { selectedPlaylistId = playlist.id },
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 RadioButton(
                                     selected = selectedPlaylistId == playlist.id,
+                                    enabled = !isProcessing,
                                     onClick = { selectedPlaylistId = playlist.id },
                                 )
                                 Column(modifier = Modifier.weight(1f)) {

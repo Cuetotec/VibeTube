@@ -511,3 +511,13 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
   - `setMediaNotificationProvider()` llamado ANTES de construir la sesión.
   - `onConnect`: expone `COMMAND_SET_SHUFFLE_MODE`, `COMMAND_GET_TIMELINE`, `COMMAND_PLAY_PAUSE`, `COMMAND_SEEK_TO_NEXT`, `COMMAND_SEEK_TO_PREVIOUS`.
 - Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL (solo warnings preexistentes).
+
+### Iteración 36 — Fix "No root for client com.android.systemui" + limpieza manifest (07-09-2026)
+- **Diagnóstico del error**:
+  - `MediaBrowserService: No root for client com.android.systemui` + `MediaResumeListener: Cannot resume`
+  - **Causa raíz**: SystemUI y `MediaResumeListener` se conectan al servicio vía el protocolo `MediaBrowserServiceCompat` (legacy), NO vía `MediaController` (Media3). `MediaLibraryService` tiene un método interno `getMediaLibrarySession()` que es `final` y se usa internamente para el path de `MediaBrowserServiceCompat`. El método `onGetSession()` (que sí sobreescribimos) solo se usa para el path de `MediaController`.
+  - `MediaLibrarySession.Builder.build()` llama `setSession()` en el servicio (vía `MediaSession` constructor), lo que setea el campo `session` de `MediaSessionService`, pero `MediaLibraryService` tiene un campo **separado** `mediaLibrarySession` que se setea internamente durante `build()`. Si por alguna razón el campo interno no se setea, `getMediaLibrarySession()` retorna null y `onGetRoot()` retorna null → "No root".
+- **Cambios realizados**:
+  1. **Manifest limpiado**: eliminado `<category android:name="android.intent.category.DEFAULT" />` (innecesario para servicios y potencialmente confuso para `MediaBrowserCompat` clients). Eliminada acción redundante `androidx.media3.session.MediaSessionService` (ya cubierta por `MediaLibraryService`). Solo quedan `android.media.browse.MediaBrowserService` + `androidx.media3.session.MediaLibraryService`.
+  2. **Logging en callbacks**: `onGetLibraryRoot()` y `onConnect()` ahora logean `client.packageName` y `client.uid` para diagnosticar qué clientes se conectan y cuándo.
+- Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.

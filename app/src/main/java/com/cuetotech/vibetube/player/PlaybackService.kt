@@ -1,9 +1,12 @@
 @file:OptIn(UnstableApi::class)
 package com.cuetotech.vibetube.player
 
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.KeyEvent
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -114,16 +117,21 @@ class PlaybackService : MediaLibraryService() {
             // para que MediaLibraryService lo encuentre al crear la notificación.
             setMediaNotificationProvider(CustomNotificationProvider())
 
-            // Sesión con layout personalizado (shuffle) para Android Auto.
+            // Sesión con layout personalizado (prev/next/shuffle) para Android Auto
+            // y preferencias explícitas de botones para la notificación del teléfono.
             mediaLibrarySession =
                 MediaLibrarySession.Builder(this, exoPlayer, LibraryCallback())
-                    .setCustomLayout(ImmutableList.of(buildShuffleButton()))
+                    .setCustomLayout(buildAndroidAutoLayout())
+                    .setMediaButtonPreferences(buildMediaButtonPreferences())
                     .build()
 
             // Actualiza el layout dinámico cuando cambia el modo shuffle.
             exoPlayer.addListener(object : Player.Listener {
                 override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
                     updateCustomLayout()
+                    mediaLibrarySession?.setMediaButtonPreferences(
+                        buildMediaButtonPreferences(),
+                    )
                 }
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -146,8 +154,18 @@ class PlaybackService : MediaLibraryService() {
     }
 
     // ──────────────────────────────────────────────────────────────
-    //  Shuffle button helpers
+    //  Button helpers (Android Auto custom layout + notificación)
     // ──────────────────────────────────────────────────────────────
+
+    private fun buildPrevButton(): CommandButton = CommandButton.Builder(CommandButton.ICON_PREVIOUS)
+        .setDisplayName("Anterior")
+        .setPlayerCommand(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+        .build()
+
+    private fun buildNextButton(): CommandButton = CommandButton.Builder(CommandButton.ICON_NEXT)
+        .setDisplayName("Siguiente")
+        .setPlayerCommand(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+        .build()
 
     private fun buildShuffleButton(): CommandButton = CommandButton.Builder(
         if (::exoPlayer.isInitialized && exoPlayer.shuffleModeEnabled)
@@ -159,17 +177,64 @@ class PlaybackService : MediaLibraryService() {
         .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
         .build()
 
+    /**
+     * Layout explícito para Android Auto en sus ranuras de control:
+     * anterior, siguiente y aleatorio.
+     */
+    private fun buildAndroidAutoLayout(): ImmutableList<CommandButton> =
+        ImmutableList.of(
+            buildPrevButton(),
+            buildNextButton(),
+            buildShuffleButton(),
+        )
+
+    /**
+     * Preferencias de botones de la notificación del teléfono.
+     *
+     * `DefaultMediaNotificationProvider.getMediaButtons` SOLO muestra botones de
+     * `mediaButtonPreferences` que tengan un slot (`SLOT_BACK`, `SLOT_FORWARD` o
+     * `SLOT_OVERFLOW`); un botón sin slot se descarta por completo (por eso antes
+     * no aparecía el shuffle). Con estos slots:
+     *   - shuffle → SLOT_BACK (1ª ranura, visible en compact view)
+     *   - next    → SLOT_FORWARD (3ª ranura, compact)
+     *   - prev    → SLOT_OVERFLOW (bajo la barra, al expandir)
+     * play/pause lo añade automáticamente el provider en la ranura central.
+     */
+    private fun buildMediaButtonPreferences(): ImmutableList<CommandButton> =
+        ImmutableList.of(
+            CommandButton.Builder(
+                if (::exoPlayer.isInitialized && exoPlayer.shuffleModeEnabled)
+                    CommandButton.ICON_SHUFFLE_ON
+                else
+                    CommandButton.ICON_SHUFFLE_OFF,
+            )
+                .setDisplayName("Aleatorio")
+                .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
+                .setSlots(CommandButton.SLOT_BACK)
+                .build(),
+            CommandButton.Builder(CommandButton.ICON_NEXT)
+                .setDisplayName("Siguiente")
+                .setPlayerCommand(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                .setSlots(CommandButton.SLOT_FORWARD)
+                .build(),
+            CommandButton.Builder(CommandButton.ICON_PREVIOUS)
+                .setDisplayName("Anterior")
+                .setPlayerCommand(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                .setSlots(CommandButton.SLOT_OVERFLOW)
+                .build(),
+        )
+
     private fun updateCustomLayout() {
-        mediaLibrarySession?.setCustomLayout(ImmutableList.of(buildShuffleButton()))
+        mediaLibrarySession?.setCustomLayout(buildAndroidAutoLayout())
     }
 
     // ──────────────────────────────────────────────────────────────
     //  CustomNotificationProvider
     //
     //  Implementa MediaNotification.Provider y delega en
-    //  DefaultMediaNotificationProvider. Inyecta el botón de shuffle
-    //  en la lista de mediaButtonPreferences para que la notificación
-    //  del sistema (y Android Auto) lo muestre.
+    //  DefaultMediaNotificationProvider. Los botones (incluido el shuffle)
+    //  se controlan vía setCustomLayout + setMediaButtonPreferences de la
+    //  sesión, por lo que aquí solo se delega.
     // ──────────────────────────────────────────────────────────────
 
     private inner class CustomNotificationProvider : MediaNotification.Provider {
@@ -181,24 +246,9 @@ class PlaybackService : MediaLibraryService() {
             actionFactory: MediaNotification.ActionFactory,
             onNotificationChangedCallback: MediaNotification.Provider.Callback,
         ): MediaNotification = try {
-            val shuffleButton = CommandButton.Builder(
-                if (exoPlayer.shuffleModeEnabled)
-                    CommandButton.ICON_SHUFFLE_ON
-                else
-                    CommandButton.ICON_SHUFFLE_OFF,
-            )
-                .setDisplayName("Aleatorio")
-                .setPlayerCommand(Player.COMMAND_SET_SHUFFLE_MODE)
-                .build()
-
-            val customButtons = ImmutableList.builder<CommandButton>()
-                .add(shuffleButton)
-                .addAll(mediaButtonPreferences)
-                .build()
-
             defaultProvider.createNotification(
                 mediaSession,
-                customButtons,
+                mediaButtonPreferences,
                 actionFactory,
                 onNotificationChangedCallback,
             )
@@ -361,6 +411,47 @@ class PlaybackService : MediaLibraryService() {
                     .add(Player.COMMAND_PLAY_PAUSE)
                     .build()
             return MediaSession.ConnectionResult.accept(sessionCommands, playerCommands)
+        }
+
+        /**
+         * Intercepta/permite los botones físicos del volante y auriculares.
+         *
+         * Media3 ya mapea KEYCODE_MEDIA_NEXT/PREVIOUS a seekToNext/Precious en
+         * [androidx.media3.session.MediaSessionImpl], pero lo hacemos explícito
+         * para garantizar que el volante de Android Auto cambie de canción. La
+         * llamada ocurre en el hilo de aplicación (Media3 lo verifica antes de
+         * invocar el callback), por lo que no hay race con el player.
+         */
+        override fun onMediaButtonEvent(
+            session: MediaSession,
+            controllerInfo: MediaSession.ControllerInfo,
+            intent: Intent,
+        ): Boolean {
+            val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+            }
+            Log.d(
+                TAG_MEDIA,
+                "onMediaButtonEvent: action=${intent.action} " +
+                    "keyCode=${keyEvent?.keyCode} client=${controllerInfo.packageName}",
+            )
+            if (keyEvent != null && keyEvent.action == KeyEvent.ACTION_DOWN) {
+                when (keyEvent.keyCode) {
+                    KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                        exoPlayer.seekToNextMediaItem()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                        exoPlayer.seekToPreviousMediaItem()
+                        return true
+                    }
+                }
+            }
+            // Otros eventos: los maneja Media3 internamente (play/pause, stop, ...).
+            return super.onMediaButtonEvent(session, controllerInfo, intent)
         }
 
         /**

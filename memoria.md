@@ -557,3 +557,25 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **Botón shuffle Android Auto**: ya se inyecta vía `buildShuffleButton()` en el `setCustomLayout` (`COMMAND_SET_SHUFFLE_MODE`), y el reader `onShuffleModeEnabledChanged` actualiza el icono ON/OFF.
 - **Nota sobre detenerse al final**: con `RepeatMode.OFF`, al llegar a la última pista ExoPlayer entra en `STATE_ENDED` y se detiene (comportamiento esperado). Para reproducción continua infinita se necesita `RepeatMode.ALL`, que lo controla el ViewModel (`repeatModeToMedia`) y se envía al servicio.
 - Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.
+
+### Iteración 39 — Android Auto: custom layout, botones físicos/volante y shuffle en notificación (08-09-2026)
+- **Problema persistente en el coche**: la app móvil funciona, pero en Android Auto no aparecen "Siguiente" ni "Aleatorio", el volante no cambia de canción, y tampoco hay shuffle en la notificación del teléfono.
+- **Causa raíz #1 (shuffle no aparece en la notificación)** — leído en `DefaultMediaNotificationProvider.getMediaButtons` (media3 1.10.1):
+  - Solo se muestran botones de `mediaButtonPreferences` que tienen UN SLOT: `SLOT_BACK`, `SLOT_FORWARD` o `SLOT_OVERFLOW`.
+  - Un `CommandButton` construido SIN `setSlots()` tiene `SLOT_OVERFLOW` por defecto solo si se pasa por `convertToPredefinedCustomCommandButton`; pero el shuffle que inyectábamos en `CustomNotificationProvider` no tenía slot → `getCustomLayoutFromMediaButtonPreferences` lo DESCARTA por completo → por eso nunca se veía.
+  - **Fix**: `setMediaButtonPreferences(...)` en el Builder de la sesión con slots explícitos:
+    - shuffle → `SLOT_BACK` (ranura 1ª → compact view de la notificación)
+    - next → `SLOT_FORWARD` (3ª ranura → compact)
+    - prev → `SLOT_OVERFLOW` (al expandir la notificación)
+    - play/pause lo añade el provider automáticamente en la ranura central.
+- **Causa raíz #2 (sin botones next/prev/shuffle en Android Auto)**:
+  - El layout de Android Auto se controla con `session.setCustomLayout(...)`. Solo teníamos el shuffle.
+  - **Fix**: nuevo `buildAndroidAutoLayout()` = [Anterior(ICON_PREVIOUS), Siguiente(ICON_NEXT), Aleatorio(ICON_SHUFFLE_ON/OFF)] con player commands `COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM` / `COMMAND_SEEK_TO_NEXT_MEDIA_ITEM` / `COMMAND_SET_SHUFFLE_MODE`. Se pasa por `.setCustomLayout(...)` y se refresca en `updateCustomLayout()`.
+- **Causa raíz #3 (volante no cambia de canción)**:
+  - Media3 ya mapea `KEYCODE_MEDIA_NEXT`/`KEYCODE_MEDIA_PREVIOUS` internamente, pero las llaves del coche/auriculares llegan como `Intent.EXTRA_KEY_EVENT` de `ACTION_MEDIA_BUTTON`.
+  - **Fix**: override de `onMediaButtonEvent(session, controllerInfo, intent)` en `LibraryCallback`: extrae el `KeyEvent`, y si es `ACTION_DOWN` con `KEYCODE_MEDIA_NEXT`/`KEYCODE_MEDIA_PREVIOUS` ejecuta directamente `exoPlayer.seekToNextMediaItem()` / `seekToPreviousMediaItem()` y consume el evento (return true). Para el resto delega en `super` (Media3 sigue manejando play/pause/stop). El callback se invoca ya en el hilo de aplicación (Media3 llama `verifyApplicationThread()` antes), sin race con el player.
+  - **Fix complementario**: declarado `<receiver android:name="androidx.media3.session.MediaButtonReceiver">` en el manifest para `android.intent.action.MEDIA_BUTTON`. MediaButtonReceiver (media3) hace start del `MediaLibraryService` existente (usa `SERVICE_INTERFACE` ya declarado) y reenvía el KeyEvent a la sesión.
+- **Comando shuffle en acciones principales**: `COMMAND_SET_SHUFFLE_MODE` ya está en `availablePlayerCommands` (Iteración 38) y ahora también en los botones de preferencias (slot `SLOT_BACK`) + layout Android Auto. Al activar shuffle, `onShuffleModeEnabledChanged` refresca layout AA y `mediaButtonPreferences` (icono ON/OFF en la notificación).
+- **CustomNotificationProvider simplificado**: ya no inyecta manualmente el shuffle (sin slot, se descartaba); ahora delega directo en `DefaultMediaNotificationProvider` porque los botones se definen en `setMediaButtonPreferences`.
+- Nuevos helpers: `buildPrevButton()`, `buildNextButton()`, `buildAndroidAutoLayout()`, `buildMediaButtonPreferences()`.
+- Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.

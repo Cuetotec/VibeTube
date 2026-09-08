@@ -125,6 +125,18 @@ class PlaybackService : MediaLibraryService() {
                 override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
                     updateCustomLayout()
                 }
+
+                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    Log.d(
+                        TAG_MEDIA,
+                        "onMediaItemTransition: idx=${exoPlayer.currentMediaItemIndex}/" +
+                            "${exoPlayer.mediaItemCount} uri=${mediaItem?.localConfiguration?.uri}",
+                    )
+                }
+
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    Log.d(TAG_MEDIA, "onPlaybackStateChanged: state=$playbackState")
+                }
             })
 
             Log.d(TAG_MEDIA, "PlaybackService: onCreate OK")
@@ -334,13 +346,19 @@ class PlaybackService : MediaLibraryService() {
             // "No root for client com.android.systemui".
             val sessionCommands =
                 MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
+            // Comandos de transporte explícitos: control de pista siguiente/anterior,
+            // modo de reproducción y aleatorio, tanto en la notificación como en
+            // Android Auto.
             val playerCommands =
                 MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+                    .add(Player.COMMAND_SEEK_TO_NEXT)
+                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
                     .add(Player.COMMAND_SET_SHUFFLE_MODE)
+                    .add(Player.COMMAND_SET_REPEAT_MODE)
                     .add(Player.COMMAND_GET_TIMELINE)
                     .add(Player.COMMAND_PLAY_PAUSE)
-                    .add(Player.COMMAND_SEEK_TO_NEXT)
-                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
                     .build()
             return MediaSession.ConnectionResult.accept(sessionCommands, playerCommands)
         }

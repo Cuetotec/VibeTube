@@ -535,3 +535,25 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
   - `onGetChildren` (browse Android Auto): descarga las portadas de las canciones de la lista y las embebe en el metadata.
   - `PlaybackController.buildMediaItem` sigue pasando `setArtworkUri` (la URL), pero `PlaybackService` la descarga y la convierte en `artworkData` antes de entregarla a ExoPlayer/SystemUI. `MediaMetadata.setArtworkData(byte[])` está deprecado → se usa la versión de 2 args `setArtworkData(byte[], pictureType)`.
 - Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL (solo warning preexistente `FOLDER_TYPE_PLAYLISTS`).
+
+### Iteración 38 — Controles de transporte (next/prev/shuffle/repeat) en Android Auto + notificación (07-09-2026)
+- **Problema**: Android Auto y la notificación ya conectan, pero faltaban los controles de siguiente/anterior y aleatorio; además la música se detenía al terminar la canción actual.
+- **Cambios en `PlaybackService.onConnect`**:
+  - `availablePlayerCommands` ahora incluye explícitamente:
+    - `COMMAND_SEEK_TO_NEXT`, `COMMAND_SEEK_TO_NEXT_MEDIA_ITEM`
+    - `COMMAND_SEEK_TO_PREVIOUS`, `COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM`
+    - `COMMAND_SET_SHUFFLE_MODE`, `COMMAND_SET_REPEAT_MODE`
+    - `COMMAND_GET_TIMELINE`, `COMMAND_PLAY_PAUSE`
+  - `availableSessionCommands` = `DEFAULT_SESSION_AND_LIBRARY_COMMANDS` (ya incluía library commands).
+  - Nota: los comandos de transporte son **player commands**, no session commands; por eso se añaden a `availablePlayerCommands` (la notificación, `MediaController` y Android Auto leen esa lista para habilitar botones).
+- **Cola completa vía setMediaItems (verificado)**: la lista completa ya se entrega al reproductor en dos rutas:
+  1. `PlaybackController.syncPlaylist()` → `controller.setMediaItems(items, startIndex, 0L)` con TODOS los items (URIs ya resueltas en phone side).
+  2. `PlaybackService.onSetMediaItems()` → devuelve `MediaItemsWithStartPosition(prepared, targetIndex, ...)` y Media3 la aplica con `player.setMediaItems(...)`.
+  - En la ruta del controlador los items ya traen URI, por lo que la cola completa llega con audio y ExoPlayer puede auto-advance normal.
+- **Auto-advance / "se detiene al terminar"**: como la cola completa con URIs se carga en ExoPlayer, el avance automático es el nativo. Se añaden logs de diagnóstico:
+  - `onMediaItemTransition` (idx/count/uri)
+  - `onPlaybackStateChanged` (state)
+  - Para ver en el logcat si el reproductor avanza de canción y el estado del player.
+- **Botón shuffle Android Auto**: ya se inyecta vía `buildShuffleButton()` en el `setCustomLayout` (`COMMAND_SET_SHUFFLE_MODE`), y el reader `onShuffleModeEnabledChanged` actualiza el icono ON/OFF.
+- **Nota sobre detenerse al final**: con `RepeatMode.OFF`, al llegar a la última pista ExoPlayer entra en `STATE_ENDED` y se detiene (comportamiento esperado). Para reproducción continua infinita se necesita `RepeatMode.ALL`, que lo controla el ViewModel (`repeatModeToMedia`) y se envía al servicio.
+- Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.

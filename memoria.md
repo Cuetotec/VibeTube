@@ -579,3 +579,19 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
 - **CustomNotificationProvider simplificado**: ya no inyecta manualmente el shuffle (sin slot, se descartaba); ahora delega directo en `DefaultMediaNotificationProvider` porque los botones se definen en `setMediaButtonPreferences`.
 - Nuevos helpers: `buildPrevButton()`, `buildNextButton()`, `buildAndroidAutoLayout()`, `buildMediaButtonPreferences()`.
 - Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.
+
+### Iteración 40 — Cola completa en Android Auto (single item → playlist) y comandos siempre activos (08-09-2026)
+- **Problema**: los botones YA aparecen en la pantalla del coche, pero al pulsarlos (o con el volante) no hacen nada, y la canción se detiene al terminar. Causa: cuando Android Auto selecciona un elemento de la lista, solo se carga UN `MediaItem` individual en el timeline de ExoPlayer (vía `onSetMediaItems` con 1 item, o `playFromMediaId` legacy que también acaba en ese callback). Con 1 item: `seekToNext`/`seekToPrevious` no tienen a dónde ir y al terminar → `STATE_ENDED`.
+  - Documentado en media3: `onSetMediaItems` ES el callback que recibe AA al seleccionar desde el catálogo (Media1/legacy, `playFromMediaId`, `prepareFromMediaId`, etc.) → "This callback is also called when... selecting an item for preparation from Android Auto". Es el lugar correcto para expandir a la playlist completa.
+- **Fix 1 — Expandir item único a la playlist completa en `onSetMediaItems`**:
+  - Nuevo flujo: si el cliente envía >1 item → se usa tal cual. Si envía 1 item → se parsea `playlistId` del mediaId (`playlistId:youtubeId`), se carga la playlist completa con `loadPlaylistItems(playlistId)` (nuevo helper: Firestore + artwork embebido, en `Dispatchers.IO`) y se responde con `MediaItemsWithStartPosition(playlistCompleta, targetIndex, ...)` donde `targetIndex` es la canción elegida.
+  - `resolveQueueFuture(...)` (refactor del cuerpo antiguo): resuelve URL de la canción seleccionada (arranque rápido), responde INMEDIATAMENTE con la lista completa, y resuelve el resto en background.
+- **Fix 2 — Rellenar URIs en el timeline entregado (`backfillTimelineUris`)**:
+  - La lista completa se entrega con URI solo en el target; el resto queda sin `LocalConfiguration`. Si ExoPlayer avanzara a una canción sin URI, fallaría (esto era también un bug latente del flujo anterior).
+  - Al terminar la resolución en background, `backfillTimelineUris()` lee el timeline ACTUAL (`exoPlayer.getMediaItemAt(i)` hasta `mediaItemCount`) y, para cada item sin URI con URL ya en `urlCache`, hace `exoPlayer.replaceMediaItems(0, count, rebuilt)`. Solo reemplaza URIs (nunca rompe otra cola: empareja por youtubeId del mediaId). Auto-advance funcionando.
+- **Fix 3 — `onAddMediaItems`**: resuelve las URIs de items añadidos con `addQueueItem` (llegan sin `LocalConfiguration`), en vez de lanzar `UnsupportedOperationException` como hace el default.
+- **Fix 4 — Comandos de transporte SIEMPRE activos (`TransportCommandsPlayer`)**:
+  - `ForwardingPlayer` (media3-common) que envuelve el `exoPlayer` y se pasa a la `MediaSession` (`sessionPlayer`). Override de `getAvailableCommands()`/`isCommandAvailable()` para mantener SIEMPRE `COMMAND_PLAY_PAUSE`, `COMMAND_SEEK_TO_NEXT`, `COMMAND_SEEK_TO_NEXT_MEDIA_ITEM`, `COMMAND_SEEK_TO_PREVIOUS`, `COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM`, `COMMAND_SET_SHUFFLE_MODE`, `COMMAND_SET_REPEAT_MODE`, aunque el timeline cambie dinámicamente (ExoPlayer sin esto quita `seekToNext/Prev` con colas de 1 item → AA/volante los deshabilitaban).
+  - Solo AÑADE comandos (nunca elimina) → no necesita ocultar `onAvailableCommandsChanged` (según doc de `ForwardingPlayer`).
+- **`onGetChildren` refactorizado** para reutilizar `loadPlaylistItems` (elimina duplicación; los items de browse ya llevan metadata y artwork correctos).
+- Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.

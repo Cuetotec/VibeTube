@@ -37,8 +37,11 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -436,73 +439,61 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Prepara y entrega una cola de [MediaItem] al reproductor:
-     * 1. Resuelve la URL de la canción seleccionada (latencia mínima, arranque
-     *    rápido) y la portada.
-     * 2. Responde a ExoPlayer/Auto INMEDIATAMENTE con la lista completa en
-     *    [MediaItemsWithStartPosition] (indice inicial = canción elegida).
-     * 3. Resuelve el resto de URLs en background y rellena las URIs en el
+     * Prepara y entrega una cola de [MediaItem] al reproductor.
+     *
+     * Resolución PARALELA con timeout garantizado:
+     * 1. Lanza la resolución de la URL de audio (NewPipe) y la descarga de
+     *    portada en paralelo usando `coroutineScope + async`.
+     * 2. Espera la URL con un timeout duro de 10 s (nunca bloquea más allá
+     *    de lo que Android Auto tolera).
+     * 3. Responde a ExoPlayer/Auto con la lista completa (URIs de cache).
+     * 4. Resuelve el resto de URLs en background y rellena las URIs en el
      *    timeline ya entregado (auto-advance sin cortes).
      */
-    private suspend fun resolveQueueFuture(
+    private suspend fun resolveQueueFast(
         settableFuture: SettableFuture<MediaItemsWithStartPosition>,
         mediaItems: List<MediaItem>,
         startIndex: Int,
         startPositionMs: Long,
-    ) {
+    ) = coroutineScope {
         val youtubeIds = mediaItems.map { splitMediaId(it.mediaId).second }
         val targetIndex = if (mediaItems.isEmpty()) 0 else startIndex.coerceIn(mediaItems.indices)
         val targetYtId = youtubeIds.getOrNull(targetIndex)
 
-        // 1. Resolver la canción seleccionada en IO (arranque rápido)
-        if (targetYtId != null && !urlCache.containsKey(targetYtId)) {
-            val url = withContext(Dispatchers.IO) {
-                YouTubeStreamResolver.resolveAudioUrls(listOf(targetYtId))
-                    .firstOrNull()
-            }
-            if (url != null) urlCache[targetYtId] = url
-        }
-
-        // 2. Portada de la canción seleccionada
-        val targetItem = mediaItems.getOrNull(targetIndex)
-        if (targetItem != null && targetYtId != null) {
-            val targetImageUrl = targetItem.mediaMetadata.artworkUri?.toString().orEmpty()
-            if (artworkCache[targetYtId] == null && targetImageUrl.isNotBlank()) {
-                fetchArtworkData(targetYtId, targetImageUrl)
-            }
-        }
-
-        // 3. Preparar items con URIs y artwork disponibles
-        val prepared = mediaItems.mapIndexed { index, item ->
-            val cached = urlCache[youtubeIds[index]]
-            val withUrl = if (cached != null) {
-                item.buildUpon().setUri(Uri.parse(cached)).build()
+        // 1. Resolución en PARALELO: URL de audio + portada
+        val urlDef = async(Dispatchers.IO) {
+            if (targetYtId != null && urlCache[targetYtId] == null) {
+                YouTubeStreamResolver.resolveAudioUrls(listOf(targetYtId)).firstOrNull()
             } else {
-                item
+                urlCache[targetYtId]
             }
-            withArtwork(withUrl, youtubeIds[index])
         }
 
-        // 4. Responder a ExoPlayer/Auto inmediatamente con la cola completa
+        // Portada en background (no bloquea la respuesta)
+        if (targetYtId != null) {
+            val targetItem = mediaItems.getOrNull(targetIndex)
+            if (targetItem != null) {
+                val img = targetItem.mediaMetadata.artworkUri?.toString().orEmpty()
+                if (artworkCache[targetYtId] == null && img.isNotBlank()) {
+                    async(Dispatchers.IO) { fetchArtworkData(targetYtId, img) }
+                }
+            }
+        }
+
+        // 2. Espera la URL con timeout duro (10 s)
+        val audioUrl = withTimeoutOrNull(10_000L) { urlDef.await() }
+        if (audioUrl != null && targetYtId != null) {
+            urlCache[targetYtId] = audioUrl
+        }
+
+        // 3. Preparar items desde cache y responder
+        val prepared = prepareItemsFromCache(mediaItems)
         settableFuture.set(
             MediaItemsWithStartPosition(prepared, targetIndex, startPositionMs),
         )
 
-        // 5. Resolver el resto en background (IO) y, al terminar, rellenar las
-        //    URIs en el timeline que ya se entregó para que el auto-advance a la
-        //    siguiente canción tenga URL.
-        val remaining = youtubeIds.filterIndexed { i, id ->
-            i != targetIndex && !urlCache.containsKey(id)
-        }
-        if (remaining.isNotEmpty()) {
-            val urls = withContext(Dispatchers.IO) {
-                YouTubeStreamResolver.resolveAudioUrls(remaining)
-            }
-            urls.forEachIndexed { i, url ->
-                url?.let { urlCache[remaining[i]] = it }
-            }
-            backfillTimelineUris()
-        }
+        // 4. Resolución en background del resto de URLs
+        resolveRemainingInBackground(mediaItems, targetIndex)
     }
 
     /**
@@ -535,6 +526,51 @@ class PlaybackService : MediaLibraryService() {
             }
         } catch (e: Exception) {
             Log.w(TAG_MEDIA, "backfillTimelineUris: no se pudo rellenar URIs", e)
+        }
+    }
+
+    /**
+     * Prepara una lista de [MediaItem] resolviendo URIs de audio desde
+     * [urlCache] y aplicando artwork cacheado. No realiza I/O; solo usa
+     * datos ya disponibles en memoria.
+     */
+    private fun prepareItemsFromCache(items: List<MediaItem>): List<MediaItem> =
+        items.map { item ->
+            val ytId = splitMediaId(item.mediaId).second
+            val cached = urlCache[ytId]
+            val withUrl = if (cached != null) {
+                item.buildUpon().setUri(Uri.parse(cached)).build()
+            } else {
+                item
+            }
+            withArtwork(withUrl, ytId)
+        }
+
+    /**
+     * Resuelve en background las URIs de audio que falten en la cola y
+     * rellena las URIs en el timeline de ExoPlayer para que el auto-advance
+     * a la siguiente canción tenga URL lista.
+     */
+    private fun resolveRemainingInBackground(
+        items: List<MediaItem>,
+        skipIndex: Int,
+    ) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val remaining = items.filterIndexed { i, _ -> i != skipIndex }
+                    .map { splitMediaId(it.mediaId).second }
+                    .filter { it.isNotBlank() && urlCache[it] == null }
+                if (remaining.isEmpty()) return@launch
+
+                Log.d(TAG_MEDIA, "resolveRemainingInBackground: ${remaining.size} URLs pendientes")
+                val urls = YouTubeStreamResolver.resolveAudioUrls(remaining)
+                urls.forEachIndexed { i, url ->
+                    url?.let { urlCache[remaining[i]] = it }
+                }
+                withContext(Dispatchers.Main) { backfillTimelineUris() }
+            } catch (e: Exception) {
+                Log.w(TAG_MEDIA, "resolveRemainingInBackground: error", e)
+            }
         }
     }
 
@@ -649,10 +685,14 @@ class PlaybackService : MediaLibraryService() {
          * entregara tal cual, ExoPlayer tendría un timeline de 1 item: los botones
          * next/prev no hacen nada y al terminar la canción se detiene.
          *
-         * Aquí se expande ese item a la playlist/folder completa a la que pertenece
-         * (vía el prefijo `playlistId` del mediaId) y se devuelve la lista completa
-         * en [MediaItemsWithStartPosition], marcando como índice inicial la canción
-         * elegida. Si el cliente ya envió la lista completa, se usa tal cual.
+         * Diseño asíncrono con timeouts:
+         * - La resolución de la URL de audio (NewPipe) y la carga de playlist
+         *   (Firestore) se lanzan EN PARALELO.
+         * - Se espera un timeout duro de 10 s para la URL y 4 s para la
+         *   playlist, garantizando que el future SIEMPRE se resuelva a tiempo
+         *   para que Android Auto no aborte por timeout.
+         * - La cola completa y las URLs restantes se resuelven en background
+         *   después de responder.
          */
         override fun onSetMediaItems(
             mediaSession: MediaSession,
@@ -665,40 +705,104 @@ class PlaybackService : MediaLibraryService() {
 
             serviceScope.launch {
                 try {
-                    // El cliente ya envió la cola completa: resolver tal cual.
+                    // Cola completa: resolver con resolveQueueFast (paralelo + timeout)
                     if (mediaItems.size > 1) {
-                        resolveQueueFuture(settableFuture, mediaItems, startIndex, startPositionMs)
+                        resolveQueueFast(settableFuture, mediaItems, startIndex, startPositionMs)
                         return@launch
                     }
 
-                    // Item único: intentar expandir a la playlist completa.
+                    // ── Item único: expandir a playlist completa ──
                     val mediaId = mediaItems.firstOrNull()?.mediaId
                     val (playlistId, youtubeId) = splitMediaId(mediaId.orEmpty())
-                    if (playlistId != null && playlistId.isNotBlank()) {
-                        val playlistItems = withContext(Dispatchers.IO) {
-                            loadPlaylistItems(playlistId)
-                        }
-                        if (playlistItems.isNotEmpty()) {
-                            val targetIndex = playlistItems.indexOfFirst {
-                                splitMediaId(it.mediaId).second == youtubeId
-                            }.let { if (it >= 0) it else 0 }
-                            Log.d(
-                                TAG_MEDIA,
-                                "onSetMediaItems: expandiendo item único a ${playlistItems.size} " +
-                                    "canciones (target=$targetIndex) de $playlistId",
-                            )
-                            resolveQueueFuture(
-                                settableFuture,
-                                playlistItems,
-                                targetIndex,
-                                startPositionMs,
-                            )
-                            return@launch
+
+                    // FASE 1: URL de audio + playlist EN PARALELO
+                    val urlDef = async(Dispatchers.IO) {
+                        if (!youtubeId.isNullOrBlank() && urlCache[youtubeId] == null) {
+                            YouTubeStreamResolver.resolveAudioUrls(listOf(youtubeId))
+                                .firstOrNull()
+                        } else {
+                            urlCache[youtubeId]
                         }
                     }
+                    val playlistDef = async(Dispatchers.IO) {
+                        if (!playlistId.isNullOrBlank()) loadPlaylistItems(playlistId) else null
+                    }
 
-                    // Sin contexto de playlist: resolver el item único tal cual.
-                    resolveQueueFuture(settableFuture, mediaItems, startIndex, startPositionMs)
+                    // FASE 2: Esperar URL con timeout duro (10 s)
+                    val audioUrl = withTimeoutOrNull(10_000L) { urlDef.await() }
+                    if (audioUrl != null && !youtubeId.isNullOrBlank()) {
+                        urlCache[youtubeId] = audioUrl
+                    }
+
+                    // Portada del target (best-effort, no bloquea)
+                    if (!youtubeId.isNullOrBlank()) {
+                        val img = mediaItems.firstOrNull()
+                            ?.mediaMetadata?.artworkUri?.toString().orEmpty()
+                        if (img.isNotBlank()) fetchArtworkData(youtubeId, img)
+                    }
+
+                    // FASE 3: Playlist con timeout corto (4 s)
+                    val playlist = withTimeoutOrNull(4_000L) { playlistDef.await() }
+
+                    if (!playlist.isNullOrEmpty()) {
+                        // Playlist lista → responder con la cola completa
+                        val targetIdx = playlist.indexOfFirst {
+                            splitMediaId(it.mediaId).second == youtubeId
+                        }.let { if (it >= 0) it else 0 }
+
+                        Log.d(
+                            TAG_MEDIA,
+                            "onSetMediaItems: expandiendo item único a ${playlist.size} " +
+                                "canciones (target=$targetIdx) de $playlistId",
+                        )
+
+                        val prepared = prepareItemsFromCache(playlist)
+                        settableFuture.set(
+                            MediaItemsWithStartPosition(prepared, targetIdx, startPositionMs),
+                        )
+
+                        // Background: resolver URLs restantes
+                        resolveRemainingInBackground(playlist, targetIdx)
+                    } else {
+                        // Playlist no lista → responder con item único ya resuelto
+                        val item = if (audioUrl != null) {
+                            val built = mediaItems.first().buildUpon()
+                                .setUri(Uri.parse(audioUrl)).build()
+                            withArtwork(built, youtubeId)
+                        } else {
+                            mediaItems.first()
+                        }
+                        settableFuture.set(
+                            MediaItemsWithStartPosition(listOf(item), 0, startPositionMs),
+                        )
+
+                        // Background: cargar playlist completa y actualizar timeline
+                        serviceScope.launch {
+                            try {
+                                val fullPlaylist = playlistDef.await()
+                                if (!fullPlaylist.isNullOrEmpty()) {
+                                    val idx = fullPlaylist.indexOfFirst {
+                                        splitMediaId(it.mediaId).second == youtubeId
+                                    }.let { if (it >= 0) it else 0 }
+
+                                    val allPrepared = prepareItemsFromCache(fullPlaylist)
+                                    exoPlayer.replaceMediaItems(
+                                        0,
+                                        exoPlayer.mediaItemCount,
+                                        allPrepared,
+                                    )
+
+                                    resolveRemainingInBackground(fullPlaylist, idx)
+                                }
+                            } catch (e: Exception) {
+                                Log.w(
+                                    TAG_MEDIA,
+                                    "onSetMediaItems: background playlist expansion failed",
+                                    e,
+                                )
+                            }
+                        }
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG_MEDIA, "onSetMediaItems: error", e)
                     settableFuture.set(
@@ -727,18 +831,16 @@ class PlaybackService : MediaLibraryService() {
                         id.isNotBlank() && urlCache[id] == null
                     }
                     if (missing.isNotEmpty()) {
-                        val urls = withContext(Dispatchers.IO) {
-                            YouTubeStreamResolver.resolveAudioUrls(missing)
+                        val urls = withTimeoutOrNull(10_000L) {
+                            withContext(Dispatchers.IO) {
+                                YouTubeStreamResolver.resolveAudioUrls(missing)
+                            }
                         }
-                        urls.forEachIndexed { i, url ->
+                        urls?.forEachIndexed { i, url ->
                             url?.let { urlCache[missing[i]] = it }
                         }
                     }
-                    val resolved = mediaItems.mapIndexed { i, item ->
-                        urlCache[youtubeIds[i]]?.let {
-                            item.buildUpon().setUri(Uri.parse(it)).build()
-                        } ?: item
-                    }
+                    val resolved = prepareItemsFromCache(mediaItems)
                     settableFuture.set(resolved)
                 } catch (e: Exception) {
                     Log.e(TAG_MEDIA, "onAddMediaItems: error", e)
@@ -807,7 +909,7 @@ class PlaybackService : MediaLibraryService() {
                 } catch (e: Exception) {
                     Log.e(TAG_MEDIA, "onGetChildren: error para parentId=$parentId", e)
                     settableFuture.set(
-                        LibraryResult.ofItemList(ImmutableList.of(), params),
+                        LibraryResult.ofError(LibraryResult.RESULT_ERROR_IO, params),
                     )
                 }
             }

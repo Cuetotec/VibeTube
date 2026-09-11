@@ -595,3 +595,23 @@ Plataforma de música personalizada y social para Android (Kotlin + Jetpack Comp
   - Solo AÑADE comandos (nunca elimina) → no necesita ocultar `onAvailableCommandsChanged` (según doc de `ForwardingPlayer`).
 - **`onGetChildren` refactorizado** para reutilizar `loadPlaylistItems` (elimina duplicación; los items de browse ya llevan metadata y artwork correctos).
 - Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.
+
+### Iteración 41 — Fix "No se ha podido cargar tu selección" en Android Auto: resolución asíncrona con timeouts y cola progresiva (11-09-2026)
+- **Síntoma**: al seleccionar cualquier canción desde la pantalla de Android Auto aparece el error "No se ha podido cargar tu selección". El fallo ocurre porque Android Auto cancela la petición por timeout si la extracción de streams (NewPipe/Firestore) no responde al instante, o si los MediaItems devueltos no contienen la mediaUri de reproducción ya resuelta.
+- **Causa raíz**: el flujo anterior era **secuencial y sin límite de tiempo**: `onSetMediaItems` cargaba la playlist desde Firestore (`loadPlaylistItems`, que además descargaba toda la artwork de la lista) y SOLO DESPUÉS resolvía la URL de audio del target con NewPipe. Solo al terminar ambos se hacía `settableFuture.set(...)`. Con Firestore lento y/o NewPipe tardando hasta 20 s por canción, el future tardaba más de lo que Android Auto tolera → aborte con "No se ha podido cargar tu selección".
+- **Fix 1 — Resolución PARALELA con timeout garantizado (`resolveQueueFast`, sustituye a `resolveQueueFuture`)**:
+  - Lanza en `coroutineScope + async(Dispatchers.IO)` la resolución de la URL de audio del target (NewPipe) y la descarga de artwork de forma **simultánea**.
+  - Espera la URL con `withTimeoutOrNull(10_000L)` → el future se resuelve SIEMPRE en ≤10 s (dentro del margen de Android Auto), haya o no URL lista.
+  - Con la URL disponible se llena `urlCache` y los items se preparan con `prepareItemsFromCache` (nuevo helper: solo cache en memoria, sin I/O).
+  - El resto de URLs se resuelven en background con `resolveRemainingInBackground` (nuevo helper: `serviceScope.launch(Dispatchers.IO)` + `backfillTimelineUris()` al terminar).
+- **Fix 2 — `onSetMediaItems` reescrito (item único → playlist completa)**:
+  - **FASE 1**: lanza en paralelo `urlDef` (resolución NewPipe del target) y `playlistDef` (carga Firestore de la playlist) vía `async(Dispatchers.IO)`.
+  - **FASE 2**: espera la URL con `withTimeoutOrNull(10_000L)`; si llega, la cachea.
+  - **FASE 3**: espera la playlist con `withTimeoutOrNull(4_000L)`.
+    - Si la playlist está lista → responde inmediatamente con la **cola completa** (`prepareItemsFromCache`) y el índice del target, y resuelve el resto en background.
+    - Si la playlist NO está lista → responde de inmediato con el **item único ya resuelto** (con URI si la URL llegó) para que la reproducción arranque, y en background carga la playlist completa y la aplica con `exoPlayer.replaceMediaItems(0, count, items)` (expansión de cola progresiva).
+  - El `SettableFuture` se resuelve **siempre** en ≤~14 s garantizado (10 s URL + 4 s playlist), evitando el timeout de Android Auto.
+- **Fix 3 — `onAddMediaItems` con timeout**: la resolución de URLs con NewPipe se envuelve en `withTimeoutOrNull(10_000L)` y los items se devuelven con `prepareItemsFromCache` (los que no tengan URL en el margen de tiempo se entregan igual, sin crash).
+- **Fix 4 — Error handling controlado en `onGetChildren`**: ante fallo de carga (Firestore/red) se devuelve `LibraryResult.ofError(LibraryResult.RESULT_ERROR_IO, params)` en lugar de una lista vacía silenciosa, y se registra `Log.e` del stack trace para que un fallo de NewPipe/Firestore nunca deje el servicio en silencio hacia Android Auto.
+- Nuevos helpers: `resolveQueueFast(...)`, `prepareItemsFromCache(...)`, `resolveRemainingInBackground(...)`; nuevas importaciones `kotlinx.coroutines.async`, `kotlinx.coroutines.coroutineScope` y `kotlinx.coroutines.withTimeoutOrNull`.
+- Verificación: `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.

@@ -216,6 +216,7 @@ class PlaybackController(private val appContext: Context) {
                 firstPlayable,
                 firstUrlString,
                 generation,
+                startPlaying,
             )
         }
         return true
@@ -232,6 +233,7 @@ class PlaybackController(private val appContext: Context) {
         firstPlayable: Int,
         firstUrlString: String,
         generation: Long,
+        startPlaying: Boolean,
     ) {
         try {
             val targetYtId = tracks[firstPlayable].youtubeId
@@ -240,12 +242,37 @@ class PlaybackController(private val appContext: Context) {
 
             withContext(Dispatchers.Main) {
                 if (generation == playbackGeneration && mediaController != null) {
-                    runCatching { controller.replaceMediaItem(0, realTarget) }
-                        .onSuccess {
-                            Log.d(TAG, "syncPlaylist: placeholder reemplazado por la URL real")
-                        }.onFailure {
-                            Log.w(TAG, "syncPlaylist: fallo al reemplazar el placeholder", it)
+                    runCatching {
+                        // HOT REPLACE robusto (reanudación tras el placeholder):
+                        // se sustituye el WAV silencioso por el MediaItem real y
+                        // se fuerza una transición COMPLETA (setMediaItem ->
+                        // prepare) para que ExoPlayer NO quede anclado en
+                        // STATE_ENDED del silent_track (si el WAV ya terminó o
+                        // la pantalla se apagó durante la resolución). Después
+                        // se preserva playWhenReady: si había reproducción en
+                        // curso (o arranque directo con audio) reanuda al
+                        // instante; si la app está en primer plano con el WebView
+                        // sonando, sigue pausado hasta el handoff/bloqueo.
+                        val shouldResume = startPlaying || controller.playWhenReady
+                        controller.setMediaItem(realTarget)
+                        controller.prepare()
+                        controller.playWhenReady = shouldResume
+                        if (shouldResume) {
+                            Log.d(
+                                TAG,
+                                "syncPlaylist: pista real reemplazada y reanudada " +
+                                    "(playWhenReady=true)",
+                            )
+                        } else {
+                            Log.d(
+                                TAG,
+                                "syncPlaylist: pista real reemplazada y preparada " +
+                                    "(pausada hasta handoff/bloqueo)",
+                            )
                         }
+                    }.onFailure {
+                        Log.w(TAG, "syncPlaylist: fallo al reemplazar el placeholder", it)
+                    }
                 }
                 realTrackDef?.complete(true)
             }
@@ -362,11 +389,20 @@ class PlaybackController(private val appContext: Context) {
         }
     }
 
-    /** Reanuda la reproducción del servicio (sin cambiar la pista actual). */
+    /**
+     * Reanuda la reproducción del servicio (sin cambiar la pista actual).
+     * Si el player quedó en STATE_ENDED (p.ej. porque el silent_track del
+     * placeholder terminó antes de que el ítem real estuviera listo), hace un
+     * seek al inicio del ítem actual para que ExoPlayer reanude de verdad en
+     * lugar de quedarse parado en silencio.
+     */
     suspend fun play() {
         val controller = mediaController ?: return
         awaitFirstTrackReady()
         withContext(Dispatchers.Main) {
+            if (controller.playbackState == Player.STATE_ENDED) {
+                controller.seekTo(controller.currentMediaItemIndex, 0L)
+            }
             controller.play()
         }
     }
@@ -398,8 +434,13 @@ class PlaybackController(private val appContext: Context) {
         val controller = mediaController ?: return
         awaitFirstTrackReady()
         withContext(Dispatchers.Main) {
+            // Si la posición del WebView es válida la usamos; si el player
+            // quedó en ENDED (silent_track terminó) reiniciamos al inicio del
+            // ítem real para reanudar sin depender del salto manual.
             if (positionMs != null && positionMs > 0) {
                 controller.seekTo(controller.currentMediaItemIndex, positionMs)
+            } else if (controller.playbackState == Player.STATE_ENDED) {
+                controller.seekTo(controller.currentMediaItemIndex, 0L)
             }
             controller.play()
         }

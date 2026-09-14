@@ -224,4 +224,108 @@ class PhoneForegroundNotificationDelayTest {
             done.await(WAIT_TOTAL_MS + 10_000L, TimeUnit.MILLISECONDS),
         )
     }
+
+    @Test
+    fun resumeAfterLock_playsRealTrackWithoutManualSkip() {
+        // Escenario real del teléfono: el usuario marca la canción en PRIMER
+        // PLANO (el audio lo aporta el WebView, startPlaying=false) y luego
+        // bloquea el teléfono (el handoff llama a play()). El hot-replace ya
+        // sustituyó el silent_track por la pista real; al reanudar, la pista 1
+        // DEBE sonar (pos avanzando) SIN necesidad de saltar manualmente.
+        val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
+        val playbackController = PlaybackController(targetContext)
+        val tracks = listOf(
+            Song("s1", YT_1, FIRST_TITLE, "Artist A", 213L),
+            Song("s2", YT_2, SECOND_TITLE, "Artist B", 253L),
+        )
+
+        val mainExecutor = ContextCompat.getMainExecutor(targetContext)
+        val mainHandler = Handler(Looper.getMainLooper())
+        val done = CountDownLatch(1)
+        val startMs = SystemClock.elapsedRealtime()
+
+        mainExecutor.execute {
+            val token = SessionToken(
+                targetContext,
+                ComponentName(targetContext, PlaybackService::class.java),
+            )
+            val observerFuture = MediaController.Builder(targetContext, token).buildAsync()
+            observerFuture.addListener({
+                val observer = try {
+                    observerFuture.get()
+                } catch (e: Exception) {
+                    Log.e(TAG, "No se pudo conectar el MediaController de observación", e)
+                    null
+                }
+                if (observer == null) {
+                    done.countDown()
+                    return@addListener
+                }
+
+                // FASE app en primer plano: servicio preparado y PAUSADO
+                // (el WebView es quien suena).
+                testScope.launch {
+                    val ok = playbackController.syncPlaylist(
+                        tracks = tracks,
+                        startIndex = 0,
+                        repeatMode = Player.REPEAT_MODE_ALL,
+                        startPlaying = false,
+                    )
+                    Log.i(TAG, "syncPlaylist(startPlaying=false) devolvió $ok")
+                }
+
+                var playIssuedAt = -1L
+                var playingRealAt = -1L
+
+                // El handoff al bloquear el teléfono ejecuta play() cuando el
+                // servicio está activo y el timeline ya tiene la pista real.
+                fun maybePlay(now: Long) {
+                    if (playIssuedAt < 0 && observer.mediaItemCount >= 1) {
+                        playIssuedAt = now
+                        Log.i(TAG, "emulando bloqueo -> playbackController.play() a t=${now}ms")
+                        testScope.launch { playbackController.play() }
+                    }
+                }
+
+                fun poll(@Suppress("UNUSED_PARAMETER") elapsed: Long) {
+                    val now = SystemClock.elapsedRealtime() - startMs
+                    val pos = observer.currentPosition
+                    maybePlay(now)
+
+                    if (playingRealAt < 0 && pos > REAL_PLAYBACK_THRESHOLD_MS) {
+                        playingRealAt = now
+                        Log.i(TAG, "RESUME REAL PLAYBACK pos=${pos}ms a t=${now}ms")
+                    }
+
+                    if (now < WAIT_TOTAL_MS && playingRealAt < 0) {
+                        mainHandler.postDelayed({ poll(elapsed + 100L) }, 100L)
+                    } else {
+                        Log.i(
+                            TAG,
+                            "=== RESUMEN lock: playAt=${playIssuedAt}ms | playingReal=${playingRealAt}ms ===",
+                        )
+                        assertTrue(
+                            "play() debió ejecutarse (handoff al bloquear)",
+                            playIssuedAt >= 0,
+                        )
+                        assertTrue(
+                            "La PRIMERA pista (real, tras hot-replace) debió sonar tras play() " +
+                                "sin salto manual (pos > ${REAL_PLAYBACK_THRESHOLD_MS}ms)",
+                            playingRealAt >= 0,
+                        )
+                        playbackController.stop()
+                        playbackController.release()
+                        observer.release()
+                        done.countDown()
+                    }
+                }
+                mainHandler.post { poll(0L) }
+            }, mainExecutor)
+        }
+
+        assertTrue(
+            "El test no terminó en ${WAIT_TOTAL_MS}ms",
+            done.await(WAIT_TOTAL_MS + 10_000L, TimeUnit.MILLISECONDS),
+        )
+    }
 }

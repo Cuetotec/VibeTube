@@ -118,6 +118,8 @@ class AndroidAutoSelectionTimeoutTest {
         var uriResolvedAt = -1L
         var readyAt = -1L
         var lastItemWithUri = false
+        var lastPosMs = -1L
+        var playbackProgressed = false
 
         fun poll(now: Long) {
             val elapsed = SystemClock.elapsedRealtime() - startMs
@@ -145,22 +147,40 @@ class AndroidAutoSelectionTimeoutTest {
                         "uri=${itemAtZero?.localConfiguration?.uri ?: "NULL"}",
                 )
             }
-            if (readyAt < 0 && (state == Player.STATE_READY || state == Player.STATE_BUFFERING)) {
+            // READY real (no BUFFERING optimista): audio decodificándose.
+            if (readyAt < 0 && state == Player.STATE_READY) {
                 readyAt = elapsed
+                val pos = controller.currentPosition
                 Log.i(
                     TAG,
-                    "Playback ${if (state == Player.STATE_READY) "READY" else "BUFFERING"} " +
-                        "a t=${elapsed}ms",
+                    "Playback READY a t=${elapsed}ms (pos=${pos}ms) " +
+                        "dur=${if (itemAtZero?.mediaMetadata?.durationMs != null) itemAtZero.mediaMetadata.durationMs else "?"}",
                 )
             }
+            // El avance de posición prueba que el audio fluye de verdad.
+            // El MediaController solo sincroniza posición periódicamente, así que
+            // usamos un umbral absoluto (cualquier muestra > 1000ms) en vez de deltas.
+            if (state == Player.STATE_READY) {
+                val pos = controller.currentPosition
+                if (!playbackProgressed && pos > 1000L) {
+                    playbackProgressed = true
+                    Log.i(TAG, "PLAYBACK AVANZA a t=${elapsed}ms (pos=${pos}ms)")
+                }
+                if (pos != lastPosMs) {
+                    lastPosMs = pos
+                    Log.d(TAG, "pos=${pos}ms a t=${elapsed}ms")
+                }
+            }
 
-            if (elapsed < WAIT_TOTAL_MS && !(uriResolvedAt >= 0 && readyAt >= 0)) {
+            val doneCondition = uriResolvedAt >= 0 && readyAt >= 0 && playbackProgressed
+            if (elapsed < WAIT_TOTAL_MS && !doneCondition) {
                 mainHandler.postDelayed({ poll(elapsed + 100L) }, 100L)
             } else {
                 Log.i(
                     TAG,
                     "=== RESUMEN: total=${elapsed}ms | timeline=${timelineReadyAt}ms | " +
                         "uri=${uriResolvedAt}ms | ready=${readyAt}ms | " +
+                        "avanza=${playbackProgressed} | pos=${controller.currentPosition}ms | " +
                         "items=${controller.mediaItemCount} ===",
                 )
                 timelineEvents.forEach { Log.d(TAG, it) }

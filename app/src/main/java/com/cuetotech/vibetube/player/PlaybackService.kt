@@ -460,12 +460,18 @@ class PlaybackService : MediaLibraryService() {
         val targetIndex = if (mediaItems.isEmpty()) 0 else startIndex.coerceIn(mediaItems.indices)
         val targetYtId = youtubeIds.getOrNull(targetIndex)
 
-        // 1. Resolución en PARALELO: URL de audio + portada
+        // 1. Resolución en PARALELO: URL de audio + portada (aislada en
+        //    try/catch para que ningún fallo cancele la corrutina padre)
         val urlDef = async(Dispatchers.IO) {
-            if (targetYtId != null && urlCache[targetYtId] == null) {
-                YouTubeStreamResolver.resolveAudioUrls(listOf(targetYtId)).firstOrNull()
-            } else {
-                urlCache[targetYtId]
+            try {
+                if (targetYtId != null && urlCache[targetYtId] == null) {
+                    YouTubeStreamResolver.resolveAudioUrls(listOf(targetYtId)).firstOrNull()
+                } else {
+                    urlCache[targetYtId]
+                }
+            } catch (e: Exception) {
+                Log.w(TAG_MEDIA, "resolveQueueFast: error resolviendo URL de $targetYtId", e)
+                null
             }
         }
 
@@ -475,7 +481,14 @@ class PlaybackService : MediaLibraryService() {
             if (targetItem != null) {
                 val img = targetItem.mediaMetadata.artworkUri?.toString().orEmpty()
                 if (artworkCache[targetYtId] == null && img.isNotBlank()) {
-                    async(Dispatchers.IO) { fetchArtworkData(targetYtId, img) }
+                    async(Dispatchers.IO) {
+                        try {
+                            fetchArtworkData(targetYtId, img)
+                        } catch (e: Exception) {
+                            Log.w(TAG_MEDIA, "resolveQueueFast: error en portada", e)
+                            null
+                        }
+                    }
                 }
             }
         }
@@ -486,47 +499,30 @@ class PlaybackService : MediaLibraryService() {
             urlCache[targetYtId] = audioUrl
         }
 
-        // 3. Preparar items desde cache y responder
+        // 3. Preparar items desde cache y responder SOLO los que tengan URI
+        //    (ExoPlayer lanza NPE con ítems sin LocalConfiguration)
         val prepared = prepareItemsFromCache(mediaItems)
+        val playable = prepared.filter { it.localConfiguration?.uri != null }
+        if (playable.isEmpty()) {
+            Log.w(
+                TAG_MEDIA,
+                "resolveQueueFast: ninguna URI resuelta en ${mediaItems.size} items",
+            )
+            settableFuture.set(MediaItemsWithStartPosition(emptyList(), 0, startPositionMs))
+            return@coroutineScope
+        }
+        val newTargetIdx = if (targetYtId != null) {
+            playable.indexOfFirst { splitMediaId(it.mediaId).second == targetYtId }
+                .let { if (it >= 0) it else 0 }
+        } else {
+            0
+        }
         settableFuture.set(
-            MediaItemsWithStartPosition(prepared, targetIndex, startPositionMs),
+            MediaItemsWithStartPosition(playable, newTargetIdx, startPositionMs),
         )
 
         // 4. Resolución en background del resto de URLs
         resolveRemainingInBackground(mediaItems, targetIndex)
-    }
-
-    /**
-     * Copia en el timeline ACTUAL de ExoPlayer las URIs que ya estén resueltas en
-     * [urlCache] para los MediaItems que llegaron sin [MediaItem.LocalConfiguration].
-     * Sin este paso, al entregar la cola completa sin URIs para las canciones
-     * siguientes, ExoPlayer no podría reproducirlas al avanzar de canción.
-     */
-    private fun backfillTimelineUris() {
-        try {
-            if (!::exoPlayer.isInitialized) return
-            val count = exoPlayer.mediaItemCount
-            if (count == 0) return
-            var changed = false
-            val rebuilt = (0 until count).map { index ->
-                val item = exoPlayer.getMediaItemAt(index)
-                val ytId = splitMediaId(item.mediaId).second
-                urlCache[ytId]?.let { url ->
-                    if (item.localConfiguration?.uri != null) {
-                        item
-                    } else {
-                        changed = true
-                        item.buildUpon().setUri(Uri.parse(url)).build()
-                    }
-                } ?: item
-            }
-            if (changed) {
-                Log.d(TAG_MEDIA, "backfillTimelineUris: rellenando URIs de $count items")
-                exoPlayer.replaceMediaItems(0, count, rebuilt)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG_MEDIA, "backfillTimelineUris: no se pudo rellenar URIs", e)
-        }
     }
 
     /**
@@ -547,9 +543,10 @@ class PlaybackService : MediaLibraryService() {
         }
 
     /**
-     * Resuelve en background las URIs de audio que falten en la cola y
-     * rellena las URIs en el timeline de ExoPlayer para que el auto-advance
-     * a la siguiente canción tenga URL lista.
+     * Resuelve en background las URIs de audio que falten en la cola y va
+     * CRECIENDO el timeline de ExoPlayer a medida que hay canciones listas.
+     * Solo inserta en el timeline items que tengan URI resuelta (ExoPlayer
+     * lanza NPE con ítems sin LocalConfiguration).
      */
     private fun resolveRemainingInBackground(
         items: List<MediaItem>,
@@ -560,14 +557,32 @@ class PlaybackService : MediaLibraryService() {
                 val remaining = items.filterIndexed { i, _ -> i != skipIndex }
                     .map { splitMediaId(it.mediaId).second }
                     .filter { it.isNotBlank() && urlCache[it] == null }
-                if (remaining.isEmpty()) return@launch
-
-                Log.d(TAG_MEDIA, "resolveRemainingInBackground: ${remaining.size} URLs pendientes")
-                val urls = YouTubeStreamResolver.resolveAudioUrls(remaining)
-                urls.forEachIndexed { i, url ->
-                    url?.let { urlCache[remaining[i]] = it }
+                if (remaining.isNotEmpty()) {
+                    Log.d(
+                        TAG_MEDIA,
+                        "resolveRemainingInBackground: ${remaining.size} URLs pendientes",
+                    )
+                    val urls = YouTubeStreamResolver.resolveAudioUrls(remaining)
+                    urls.forEachIndexed { i, url ->
+                        url?.let { urlCache[remaining[i]] = it }
+                    }
                 }
-                withContext(Dispatchers.Main) { backfillTimelineUris() }
+
+                val playable = prepareItemsFromCache(items)
+                    .filter { it.localConfiguration?.uri != null }
+                if (playable.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        val current = exoPlayer.mediaItemCount
+                        if (playable.size > current) {
+                            Log.d(
+                                TAG_MEDIA,
+                                "resolveRemainingInBackground: cola crece " +
+                                    "$current → ${playable.size} (URIs resueltas)",
+                            )
+                            exoPlayer.replaceMediaItems(0, current, playable)
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 Log.w(TAG_MEDIA, "resolveRemainingInBackground: error", e)
             }
@@ -715,17 +730,32 @@ class PlaybackService : MediaLibraryService() {
                     val mediaId = mediaItems.firstOrNull()?.mediaId
                     val (playlistId, youtubeId) = splitMediaId(mediaId.orEmpty())
 
-                    // FASE 1: URL de audio + playlist EN PARALELO
+                    // FASE 1: URL de audio + playlist EN PARALELO.
+                    // Cada `async` va AISLADO con try/catch interno: si Firestore
+                    // falla (p.ej. PERMISSION_DENIED o plugin caído), NO debe
+                    // cancelar la resolución de la URL hermana (structured
+                    // concurrency) ni lanzar JobCancellationException.
                     val urlDef = async(Dispatchers.IO) {
-                        if (!youtubeId.isNullOrBlank() && urlCache[youtubeId] == null) {
-                            YouTubeStreamResolver.resolveAudioUrls(listOf(youtubeId))
-                                .firstOrNull()
-                        } else {
-                            urlCache[youtubeId]
+                        try {
+                            if (!youtubeId.isNullOrBlank() && urlCache[youtubeId] == null) {
+                                YouTubeStreamResolver.resolveAudioUrls(listOf(youtubeId))
+                                    .firstOrNull()
+                            } else {
+                                urlCache[youtubeId]
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG_MEDIA, "onSetMediaItems: urlDef falló", e)
+                            null
                         }
                     }
                     val playlistDef = async(Dispatchers.IO) {
-                        if (!playlistId.isNullOrBlank()) loadPlaylistItems(playlistId) else null
+                        try {
+                            if (!playlistId.isNullOrBlank()) loadPlaylistItems(playlistId)
+                            else null
+                        } catch (e: Exception) {
+                            Log.w(TAG_MEDIA, "onSetMediaItems: playlistDef falló", e)
+                            null
+                        }
                     }
 
                     // FASE 2: Esperar URL con timeout duro (10 s)
@@ -745,7 +775,8 @@ class PlaybackService : MediaLibraryService() {
                     val playlist = withTimeoutOrNull(4_000L) { playlistDef.await() }
 
                     if (!playlist.isNullOrEmpty()) {
-                        // Playlist lista → responder con la cola completa
+                        // Playlist lista → responder con la cola completa, pero
+                        // SOLO items con URI resuelta (evita el NPE de ExoPlayer).
                         val targetIdx = playlist.indexOfFirst {
                             splitMediaId(it.mediaId).second == youtubeId
                         }.let { if (it >= 0) it else 0 }
@@ -756,20 +787,57 @@ class PlaybackService : MediaLibraryService() {
                                 "canciones (target=$targetIdx) de $playlistId",
                         )
 
-                        val prepared = prepareItemsFromCache(playlist)
-                        settableFuture.set(
-                            MediaItemsWithStartPosition(prepared, targetIdx, startPositionMs),
-                        )
+                        val playable = prepareItemsFromCache(playlist)
+                            .filter { it.localConfiguration?.uri != null }
+                        val targetIdxPlayable = playable.indexOfFirst {
+                            splitMediaId(it.mediaId).second == youtubeId
+                        }.let { if (it >= 0) it else playable.indices.firstOrNull() ?: 0 }
+
+                        if (playable.isNotEmpty()) {
+                            settableFuture.set(
+                                MediaItemsWithStartPosition(
+                                    playable,
+                                    targetIdxPlayable,
+                                    startPositionMs,
+                                ),
+                            )
+                        } else if (audioUrl != null) {
+                            // Ninguna URI lista aún → entregar el item único resuelto
+                            settableFuture.set(
+                                MediaItemsWithStartPosition(
+                                    listOf(
+                                        withArtwork(
+                                            mediaItems.first().buildUpon()
+                                                .setUri(Uri.parse(audioUrl)).build(),
+                                            youtubeId,
+                                        ),
+                                    ),
+                                    0,
+                                    startPositionMs,
+                                ),
+                            )
+                        } else {
+                            settableFuture.set(
+                                MediaItemsWithStartPosition(
+                                    mediaItems,
+                                    startIndex,
+                                    startPositionMs,
+                                ),
+                            )
+                        }
 
                         // Background: resolver URLs restantes
                         resolveRemainingInBackground(playlist, targetIdx)
                     } else {
                         // Playlist no lista → responder con item único ya resuelto
                         val item = if (audioUrl != null) {
-                            val built = mediaItems.first().buildUpon()
-                                .setUri(Uri.parse(audioUrl)).build()
-                            withArtwork(built, youtubeId)
+                            withArtwork(
+                                mediaItems.first().buildUpon()
+                                    .setUri(Uri.parse(audioUrl)).build(),
+                                youtubeId,
+                            )
                         } else {
+                            // URL falló → entregar igualmente (fallback defensivo)
                             mediaItems.first()
                         }
                         settableFuture.set(
@@ -786,11 +854,15 @@ class PlaybackService : MediaLibraryService() {
                                     }.let { if (it >= 0) it else 0 }
 
                                     val allPrepared = prepareItemsFromCache(fullPlaylist)
-                                    exoPlayer.replaceMediaItems(
-                                        0,
-                                        exoPlayer.mediaItemCount,
-                                        allPrepared,
-                                    )
+                                    val playableAll = allPrepared
+                                        .filter { it.localConfiguration?.uri != null }
+                                    if (playableAll.isNotEmpty()) {
+                                        exoPlayer.replaceMediaItems(
+                                            0,
+                                            exoPlayer.mediaItemCount,
+                                            playableAll,
+                                        )
+                                    }
 
                                     resolveRemainingInBackground(fullPlaylist, idx)
                                 }
@@ -844,7 +916,7 @@ class PlaybackService : MediaLibraryService() {
                     settableFuture.set(resolved)
                 } catch (e: Exception) {
                     Log.e(TAG_MEDIA, "onAddMediaItems: error", e)
-                    settableFuture.set(mediaItems)
+                    settableFuture.set(prepareItemsFromCache(mediaItems))
                 }
             }
             return settableFuture

@@ -15,6 +15,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -105,9 +106,13 @@ class PlaybackService : MediaLibraryService() {
     override fun onCreate() {
         super.onCreate()
         try {
-            val dataSourceFactory = DefaultHttpDataSource.Factory()
+            val httpDataSourceFactory = DefaultHttpDataSource.Factory()
                 .setUserAgent(STREAM_USER_AGENT)
                 .setAllowCrossProtocolRedirects(true)
+
+            // El factory base gestiona rawresource:// (placeholder silencioso) y
+            // delega http/https al factory HTTP de arriba.
+            val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
 
             exoPlayer = ExoPlayer.Builder(this)
                 .setMediaSourceFactory(
@@ -461,13 +466,18 @@ class PlaybackService : MediaLibraryService() {
         val targetYtId = youtubeIds.getOrNull(targetIndex)
 
         // 1. Resolución en PARALELO: URL de audio + portada (aislada en
-        //    try/catch para que ningún fallo cancele la corrutina padre)
+        //    try/catch para que ningún fallo cancele la corrutina padre).
+        //    Si el item target YA trae URI (p.ej. placeholder o URL resuelta por
+        //    el cliente), NO se re-extrae con NewPipe: se usa esa URI.
+        val targetItem = mediaItems.getOrNull(targetIndex)
+        val targetHasUri = targetItem?.localConfiguration?.uri != null
         val urlDef = async(Dispatchers.IO) {
             try {
-                if (targetYtId != null && urlCache[targetYtId] == null) {
-                    YouTubeStreamResolver.resolveAudioUrls(listOf(targetYtId)).firstOrNull()
-                } else {
-                    urlCache[targetYtId]
+                when {
+                    targetHasUri -> targetItem!!.localConfiguration!!.uri.toString()
+                    targetYtId != null && urlCache[targetYtId] == null ->
+                        YouTubeStreamResolver.resolveAudioUrls(listOf(targetYtId)).firstOrNull()
+                    else -> urlCache[targetYtId]
                 }
             } catch (e: Exception) {
                 Log.w(TAG_MEDIA, "resolveQueueFast: error resolviendo URL de $targetYtId", e)
@@ -476,18 +486,15 @@ class PlaybackService : MediaLibraryService() {
         }
 
         // Portada en background (no bloquea la respuesta)
-        if (targetYtId != null) {
-            val targetItem = mediaItems.getOrNull(targetIndex)
-            if (targetItem != null) {
-                val img = targetItem.mediaMetadata.artworkUri?.toString().orEmpty()
-                if (artworkCache[targetYtId] == null && img.isNotBlank()) {
-                    async(Dispatchers.IO) {
-                        try {
-                            fetchArtworkData(targetYtId, img)
-                        } catch (e: Exception) {
-                            Log.w(TAG_MEDIA, "resolveQueueFast: error en portada", e)
-                            null
-                        }
+        if (targetYtId != null && targetItem != null) {
+            val img = targetItem.mediaMetadata.artworkUri?.toString().orEmpty()
+            if (artworkCache[targetYtId] == null && img.isNotBlank()) {
+                async(Dispatchers.IO) {
+                    try {
+                        fetchArtworkData(targetYtId, img)
+                    } catch (e: Exception) {
+                        Log.w(TAG_MEDIA, "resolveQueueFast: error en portada", e)
+                        null
                     }
                 }
             }
@@ -647,6 +654,7 @@ class PlaybackService : MediaLibraryService() {
                     .add(Player.COMMAND_SET_REPEAT_MODE)
                     .add(Player.COMMAND_GET_TIMELINE)
                     .add(Player.COMMAND_PLAY_PAUSE)
+                    .add(Player.COMMAND_CHANGE_MEDIA_ITEMS)
                     .build()
             return MediaSession.ConnectionResult.accept(sessionCommands, playerCommands)
         }
@@ -727,7 +735,9 @@ class PlaybackService : MediaLibraryService() {
                     }
 
                     // ── Item único: expandir a playlist completa ──
-                    val mediaId = mediaItems.firstOrNull()?.mediaId
+                    val mediaItem = mediaItems.firstOrNull()
+                    val itemHasUri = mediaItem?.localConfiguration?.uri != null
+                    val mediaId = mediaItem?.mediaId
                     val (playlistId, youtubeId) = splitMediaId(mediaId.orEmpty())
 
                     // FASE 1: URL de audio + playlist EN PARALELO.
@@ -735,13 +745,16 @@ class PlaybackService : MediaLibraryService() {
                     // falla (p.ej. PERMISSION_DENIED o plugin caído), NO debe
                     // cancelar la resolución de la URL hermana (structured
                     // concurrency) ni lanzar JobCancellationException.
+                    // Si el item YA trae URI (placeholder o URL del teléfono),
+                    // NO se re-extrae con NewPipe: se usa esa URI al instante.
                     val urlDef = async(Dispatchers.IO) {
                         try {
-                            if (!youtubeId.isNullOrBlank() && urlCache[youtubeId] == null) {
-                                YouTubeStreamResolver.resolveAudioUrls(listOf(youtubeId))
-                                    .firstOrNull()
-                            } else {
-                                urlCache[youtubeId]
+                            when {
+                                itemHasUri -> mediaItem!!.localConfiguration!!.uri.toString()
+                                !youtubeId.isNullOrBlank() && urlCache[youtubeId] == null ->
+                                    YouTubeStreamResolver.resolveAudioUrls(listOf(youtubeId))
+                                        .firstOrNull()
+                                else -> urlCache[youtubeId]
                             }
                         } catch (e: Exception) {
                             Log.w(TAG_MEDIA, "onSetMediaItems: urlDef falló", e)
@@ -888,6 +901,10 @@ class PlaybackService : MediaLibraryService() {
         /**
          * Resuelve las URIs de items añadidos con `MediaController.addQueueItem`
          * (o legacy `addQueueItem`), que llegan sin [MediaItem.LocalConfiguration].
+         *
+         * Los items que YA traen su URI (colas progresivas del teléfono) se
+         * devuelven tal cual, SIN re-extraer con NewPipe (evita duplicar trabajo
+         * y esperar un timeout innecesario).
          */
         override fun onAddMediaItems(
             mediaSession: MediaSession,
@@ -898,10 +915,10 @@ class PlaybackService : MediaLibraryService() {
 
             serviceScope.launch {
                 try {
-                    val youtubeIds = mediaItems.map { splitMediaId(it.mediaId).second }
-                    val missing = youtubeIds.filter { id ->
-                        id.isNotBlank() && urlCache[id] == null
-                    }
+                    val missing = mediaItems
+                        .filter { it.localConfiguration?.uri == null }
+                        .map { splitMediaId(it.mediaId).second }
+                        .filter { id -> id.isNotBlank() && urlCache[id] == null }
                     if (missing.isNotEmpty()) {
                         val urls = withTimeoutOrNull(10_000L) {
                             withContext(Dispatchers.IO) {

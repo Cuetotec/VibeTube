@@ -784,6 +784,28 @@ class PlaybackService : MediaLibraryService() {
         ): ListenableFuture<MediaItemsWithStartPosition> {
             val settableFuture = SettableFuture.create<MediaItemsWithStartPosition>()
 
+            // ── Passthrough SÍNCRONO del placeholder del teléfono ──
+            // El controller envía el placeholder (250ms silencioso) con un
+            // setMediaItems a través de la sesión MediaLibrary. Si este item
+            // ÚNICO ya trae URI resuelta (localConfiguration.), el servicio debe
+            // responder INMEDIATAMENTE con los mismos items y TIEMPO REAL: resolver
+            // por corrutina hacía que la respuesta del servicio llegara DESPUÉS de
+            // que el controller reemplazara el índice 0 con la pista real,
+            // re-seteando el timeline al placeholder en caliente y dejando el
+            // `silent_track` en el índice 0. Al hacer el set aquí (síncrono), el
+            // reproductor aplica [placeholder] antes de procesar el siguiente
+            // comando (replaceMediaItem(0, real)), y el reemplazo persiste.
+            if (mediaItems.size == 1 && mediaItems.firstOrNull()?.localConfiguration?.uri != null) {
+                settableFuture.set(
+                    MediaItemsWithStartPosition(
+                        mediaItems,
+                        startIndex,
+                        startPositionMs,
+                    ),
+                )
+                return settableFuture
+            }
+
             serviceScope.launch {
                 try {
                     // Cola completa: resolver con resolveQueueFast (paralelo + timeout)

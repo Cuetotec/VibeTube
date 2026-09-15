@@ -18,7 +18,13 @@ private const val TAG = "VibeTubeStream"
 
 private const val USER_AGENT =
     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+
+// Idioma/región que pide YouTube al resolver (resultados en es-ES). Enviar
+// Accept-Language SIEMPRE > LANG a las respuestas de InnerTube evita que el
+// extractor caiga en incorrect-language y que la página de búsqueda devuelva
+// la variante bloqueada por consentimiento/cookies.
+private const val ACCEPT_LANGUAGE = "es-ES,es;q=0.9,en;q=0.8"
 
 // Cookie de consentimiento de Google (SOCS). Se envía por defecto para que
 // YouTube no redirija a consent.youtube.com (banner de la UE, ucbcb=1), lo que
@@ -99,6 +105,7 @@ internal class NewPipeDownloader : Downloader() {
             .url(request.url())
             .method(request.httpMethod(), request.dataToSend()?.toRequestBody())
             .header("User-Agent", USER_AGENT)
+            .header("Accept-Language", ACCEPT_LANGUAGE)
 
         // Se añaden las cabeceras que pide NewPipe (p. ej. Content-Type de los
         // POST JSON de innerTube), sin duplicar las existentes.

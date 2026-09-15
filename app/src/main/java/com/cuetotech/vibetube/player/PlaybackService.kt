@@ -533,6 +533,49 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
+     * Hace crecer el timeline de ExoPlayer INSERTANDO en orden de playlist solo
+     * los items que aún no están en la cola (por mediaId).
+     *
+     * A diferencia de `replaceMediaItems(0, current, playable)` (un
+     * setMediaItems masivo), esto NO regenera el ShuffleOrder de ExoPlayer: al
+     * activar el modo aleatorio, un reemplazo masivo recreaba el orden con un
+     * seed nuevo — reiniciando/reordenando la lista y pudiendo terminar antes
+     * de tiempo. Añadir con addMediaItems en su posición natural mantiene el
+     * orden aleatorio ya generado y simplemente lo extiende con los ítems que
+     * se resuelven en segundo plano (syncPlaylist / resolveRemainingInBackground).
+     */
+    private fun growTimelineInPlaylistOrder(playable: List<MediaItem>, currentCount: Int) {
+        val existingIds = (0 until currentCount).map {
+            splitMediaId(exoPlayer.getMediaItemAt(it).mediaId).second
+        }
+        var pos = 0 // próxima posición de inserción en el timeline
+        var inserted = 0
+        for (index in playable.indices) {
+            val ytId = splitMediaId(playable[index].mediaId).second
+            if (ytId in existingIds) {
+                // Ya está en la cola: ocupa la siguiente ranura natural.
+                pos++
+                continue
+            }
+            runCatching {
+                // Inserta DESPUÉS de los items que ya están colocados y lo
+                // preceden en orden de playlist: preserva cola + shuffle.
+                exoPlayer.addMediaItems(pos, ImmutableList.of(playable[index]))
+            }.onSuccess {
+                inserted++
+            }.onFailure {
+                Log.w(TAG_MEDIA, "growTimeline: fallo al insertar item $index", it)
+            }
+            pos++
+        }
+        Log.d(
+            TAG_MEDIA,
+            "growTimelineInPlaylistOrder: $inserted items insertados en su posición " +
+                "(cola actual ${exoPlayer.mediaItemCount})",
+        )
+    }
+
+    /**
      * Prepara una lista de [MediaItem] resolviendo URIs de audio desde
      * [urlCache] y aplicando artwork cacheado. No realiza I/O; solo usa
      * datos ya disponibles en memoria.
@@ -586,7 +629,12 @@ class PlaybackService : MediaLibraryService() {
                                 "resolveRemainingInBackground: cola crece " +
                                     "$current → ${playable.size} (URIs resueltas)",
                             )
-                            exoPlayer.replaceMediaItems(0, current, playable)
+                            // Crecimiento IN-PLACE del timeline: solo se insertan
+                            // los items que aún no están (en orden de playlist vía
+                            // addMediaItems), NUNCA un replaceMediaItems masivo,
+                            // que recrearia el ShuffleOrder, reiniciaria/reajustaria
+                            // el orden aleatorio y podria cortar la lista.
+                            growTimelineInPlaylistOrder(playable, current)
                         }
                     }
                 }
@@ -655,6 +703,8 @@ class PlaybackService : MediaLibraryService() {
                     .add(Player.COMMAND_GET_TIMELINE)
                     .add(Player.COMMAND_PLAY_PAUSE)
                     .add(Player.COMMAND_CHANGE_MEDIA_ITEMS)
+                    .add(Player.COMMAND_SEEK_TO_MEDIA_ITEM)
+                    .add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
                     .build()
             return MediaSession.ConnectionResult.accept(sessionCommands, playerCommands)
         }
@@ -870,10 +920,16 @@ class PlaybackService : MediaLibraryService() {
                                     val playableAll = allPrepared
                                         .filter { it.localConfiguration?.uri != null }
                                     if (playableAll.isNotEmpty()) {
-                                        exoPlayer.replaceMediaItems(
-                                            0,
-                                            exoPlayer.mediaItemCount,
+                                        Log.d(
+                                            TAG_MEDIA,
+                                            "onSetMediaItems: expandiendo timeline " +
+                                                "${exoPlayer.mediaItemCount} → ${
+                                                    playableAll.size
+                                                } (sin regenerar shuffle)",
+                                        )
+                                        growTimelineInPlaylistOrder(
                                             playableAll,
+                                            exoPlayer.mediaItemCount,
                                         )
                                     }
 

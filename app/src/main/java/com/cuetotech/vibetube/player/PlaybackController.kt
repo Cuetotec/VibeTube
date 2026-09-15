@@ -244,19 +244,32 @@ class PlaybackController(private val appContext: Context) {
                 if (generation == playbackGeneration && mediaController != null) {
                     runCatching {
                         // HOT REPLACE robusto (reanudación tras el placeholder):
-                        // se sustituye el WAV silencioso por el MediaItem real y
-                        // se fuerza una transición COMPLETA (setMediaItem ->
-                        // prepare) para que ExoPlayer NO quede anclado en
-                        // STATE_ENDED del silent_track (si el WAV ya terminó o
-                        // la pantalla se apagó durante la resolución). Después
-                        // se preserva playWhenReady: si había reproducción en
-                        // curso (o arranque directo con audio) reanuda al
-                        // instante; si la app está en primer plano con el WebView
-                        // sonando, sigue pausado hasta el handoff/bloqueo.
+                        // se sustituye ÚNICAMENTE el WAV silencioso (índice 0) por
+                        // el MediaItem real, SIN borrar el resto del timeline ni
+                        // regenerar el ShuffleOrder. A diferencia de setMediaItem()
+                        // (que resetea cola, ventana y orden aleatorio), con
+                        // replaceMediaItems el silent_track queda ELIMINADO por
+                        // completo y con prepare() + seekTo(0, 0) se resetea la
+                        // ventana de reproducción para que la pista real arranque
+                        // desde el principio, evitando que onMediaItemTransition
+                        // registre un bucle residual que resetee la posición a 0
+                        // mientras la canción real ya suena.
                         val shouldResume = startPlaying || controller.playWhenReady
-                        controller.setMediaItem(realTarget)
+                        if (controller.mediaItemCount > 0) {
+                            controller.replaceMediaItems(0, 1, listOf(realTarget))
+                        } else {
+                            controller.addMediaItem(realTarget)
+                        }
                         controller.prepare()
+                        controller.seekTo(0, 0L)
                         controller.playWhenReady = shouldResume
+                        if (controller.mediaItemCount != 1) {
+                            Log.w(
+                                TAG,
+                                "syncPlaylist: hot replace con timeline inesperado " +
+                                    "(${controller.mediaItemCount} items), el backfill lo corregirá",
+                            )
+                        }
                         if (shouldResume) {
                             Log.d(
                                 TAG,

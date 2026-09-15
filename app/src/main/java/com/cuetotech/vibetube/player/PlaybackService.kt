@@ -109,6 +109,14 @@ class PlaybackService : MediaLibraryService() {
             val httpDataSourceFactory = DefaultHttpDataSource.Factory()
                 .setUserAgent(STREAM_USER_AGENT)
                 .setAllowCrossProtocolRedirects(true)
+                .setDefaultRequestProperties(
+                    mapOf(
+                        // Algunas URLs de googlevideo de NewPipe devuelven 403 o
+                        // caen en error si no se envían cabeceras de origen.
+                        "Referer" to "https://www.youtube.com/",
+                        "Accept" to "*/*",
+                    ),
+                )
 
             // El factory base gestiona rawresource:// (placeholder silencioso) y
             // delega http/https al factory HTTP de arriba.

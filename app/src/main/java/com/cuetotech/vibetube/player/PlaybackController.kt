@@ -7,6 +7,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -37,6 +38,10 @@ private const val TAG = "VibeTubePlayback"
 // Tiempo máximo de espera para que el MediaController conecte con el
 // PlaybackService; pasado este tiempo se libera el future y se puede reintentar.
 private const val CONNECT_TIMEOUT_MS = 15_000L
+
+// Veces que se reintenta re-preparar la PRIMERA pista real si su carga inicial
+// falla (403/URL expirada/red). Evita que ExoPlayer salte a la pista 1.
+private const val FIRST_TRACK_RETRIES = 2
 
 private const val ARTWORK_URL_TEMPLATE = "https://i.ytimg.com/vi/%s/hqdefault.jpg"
 
@@ -80,6 +85,14 @@ class PlaybackController(private val appContext: Context) {
     private var connectFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
 
+    // Guard de errores de la PRIMERA pista real: si su URI (resuelta por NewPipe)
+    // falla al cargar (403, URL expirada, red), ExoPlayer puede saltar al índice 1.
+    // Registrar si la pista 0 ya falló alguna vez y cuántos reintentos quedan.
+    @Volatile
+    private var firstTrackRetriesLeft = 0
+
+    private var firstTrackErrorGuardAttached = false
+
     // Mapa índice(ViewModel) -> índice(servicio) para las pistas resueltas.
     // Se va ampliando a medida que la cola se infla en background.
     @Volatile
@@ -117,6 +130,7 @@ class PlaybackController(private val appContext: Context) {
         val controller = awaitController(future)
         if (controller != null) {
             mediaController = controller
+            attachFirstTrackErrorGuard(controller)
             _isActive.value = true
             Log.d(TAG, "MediaController conectado al PlaybackService")
         } else {
@@ -126,6 +140,69 @@ class PlaybackController(private val appContext: Context) {
             connectFuture = null
         }
         controller
+    }
+
+    /**
+     * Adjunta el guard de errores de la PRIMERA pista real (índice 0). Cuando
+     * su URI resuelta por NewPipe falla en la carga inicial (p.ej. 403, URL
+     * expirada o caída de red en teléfono físico), ExoPlayer marca el estado
+     * como error/unplayable y puede ADVANZAR automáticamente a la pista 1. Este
+     * listener intercepta ese fallo mientras la pista 0 sea la actual y la
+     * re-prepara (seek al inicio + prepare) un par de veces en lugar de dejar
+     * que la cola salte a la siguiente canción.
+     */
+    private fun attachFirstTrackErrorGuard(controller: MediaController) {
+        if (firstTrackErrorGuardAttached) return
+        firstTrackErrorGuardAttached = true
+        firstTrackRetriesLeft = FIRST_TRACK_RETRIES
+        controller.addListener(
+            object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    // Solo se reintenta la pista 0 (la que viene del hot replace).
+                    if (controller.currentMediaItemIndex != 0) {
+                        return
+                    }
+                    if (error.errorCode != PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS &&
+                        error.errorCode != PlaybackException.ERROR_CODE_IO_UNSPECIFIED &&
+                        error.errorCode != PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED &&
+                        error.errorCode != PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT &&
+                        error.errorCode != PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND
+                    ) {
+                        Log.e(
+                            TAG,
+                            "Pista 0 en error irrecuperable (code=${error.errorCode}), " +
+                                "no se reintenta",
+                            error,
+                        )
+                        return
+                    }
+                    if (firstTrackRetriesLeft <= 0) {
+                        Log.e(
+                            TAG,
+                            "Pista 0 sigue fallando tras $FIRST_TRACK_RETRIES reintentos; " +
+                                "se permite el avance",
+                            error,
+                        )
+                        return
+                    }
+                    firstTrackRetriesLeft -= 1
+                    Log.w(
+                        TAG,
+                        "Pista 0 falló al cargar (code=${error.errorCode}), reintentando " +
+                            "(" + firstTrackRetriesLeft + " restantes)",
+                        error,
+                    )
+                    // Re-preparar la pista 0 en lugar de avanzar a la 1.
+                    runCatching {
+                        controller.seekTo(0, 0L)
+                        controller.prepare()
+                        controller.playWhenReady = true
+                    }.onFailure {
+                        Log.w(TAG, "Fallo al re-preparar la pista 0", it)
+                    }
+                }
+            },
+        )
     }
 
     /**
@@ -186,6 +263,7 @@ class PlaybackController(private val appContext: Context) {
 
         // Nueva generación: invalida cualquier backfill anterior.
         playbackGeneration += 1
+        firstTrackRetriesLeft = FIRST_TRACK_RETRIES
         val generation = playbackGeneration
         realTrackDef?.complete(false)
         realTrackDef = CompletableDeferred()
@@ -260,8 +338,12 @@ class PlaybackController(private val appContext: Context) {
                         } else {
                             controller.addMediaItem(realTarget)
                         }
-                        controller.prepare()
+                        // RESET de ventana + (re)preparación + confirmación de
+                        // arranque. En teléfono físico un error de carga de esta
+                        // primera URI (403/expirada) podía hacer que ExoPlayer
+                        // saltase a la pista 1; el guard abajo re-prepara la pista 0.
                         controller.seekTo(0, 0L)
+                        controller.prepare()
                         controller.playWhenReady = shouldResume
                         if (controller.mediaItemCount != 1) {
                             Log.w(

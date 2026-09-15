@@ -45,6 +45,11 @@ private const val FIRST_TRACK_RETRIES = 2
 
 private const val ARTWORK_URL_TEMPLATE = "https://i.ytimg.com/vi/%s/hqdefault.jpg"
 
+// Guardia de posición: si la pista REAL ya lleva sonando más de 1000ms, el hot
+// replace de la primera canción NO debe resetear la ventana (seekTo(0)/prepare)
+// ni reiniciar el tema a 0; solo actualiza la fuente manteniendo la posición.
+private const val FIRST_REAL_PLAYBACK_MS = 1000L
+
 // La cola del teléfono arranca con un item provisional (un WAV silencioso
 // empaquetado) que YA tiene URI: así la notificación foreground aparece al
 // instante con la metadata en caché (ExoPlayer lanza NPE con ítems sin URI),
@@ -321,48 +326,59 @@ class PlaybackController(private val appContext: Context) {
             withContext(Dispatchers.Main) {
                 if (generation == playbackGeneration && mediaController != null) {
                     runCatching {
-                        // HOT REPLACE robusto (reanudación tras el placeholder):
-                        // se sustituye ÚNICAMENTE el WAV silencioso (índice 0) por
-                        // el MediaItem real, SIN borrar el resto del timeline ni
-                        // regenerar el ShuffleOrder. A diferencia de setMediaItem()
-                        // (que resetea cola, ventana y orden aleatorio), con
-                        // replaceMediaItems el silent_track queda ELIMINADO por
-                        // completo y con prepare() + seekTo(0, 0) se resetea la
-                        // ventana de reproducción para que la pista real arranque
-                        // desde el principio, evitando que onMediaItemTransition
-                        // registre un bucle residual que resetee la posición a 0
-                        // mientras la canción real ya suena.
-                        val shouldResume = startPlaying || controller.playWhenReady
-                        if (controller.mediaItemCount > 0) {
-                            controller.replaceMediaItems(0, 1, listOf(realTarget))
+                        // GUARDIA DE POSICIÓN: si la pista REAL ya está sonando
+                        // (pos > FIRST_REAL_PLAYBACK_MS), NO se reemplaza la
+                        // fuente ni se resetea la ventana: re-reemplazar el item
+                        // actual reiniciaría el tema a 0 (el bug del reinicio a
+                        // los ~40s). La fuente ya es la real (el replace anterior
+                        // de esta generación lo dejó así); solo se confirma que la
+                        // música siga sonando de forma fluida hasta el final.
+                        if (controller.currentPosition > FIRST_REAL_PLAYBACK_MS) {
+                            Log.d(
+                                TAG,
+                                "syncPlaylist: pista real ya sonando " +
+                                    "(pos=${controller.currentPosition}ms), " +
+                                    "se omite el reemplazo SIN reset de ventana",
+                            )
                         } else {
-                            controller.addMediaItem(realTarget)
+                            // MÉTODO SIMPLE de carga de la primera pista (flujo
+                            // original): se sustituye SOLO el índice 0
+                            // (silent_track del placeholder) por el MediaItem
+                            // real. No se toca el resto del timeline ni se
+                            // regenera el ShuffleOrder.
+                            val shouldResume = startPlaying || controller.playWhenReady
+                            if (controller.mediaItemCount > 0) {
+                                controller.replaceMediaItem(0, realTarget)
+                            } else {
+                                controller.addMediaItem(realTarget)
+                            }
+                            // El placeholder sigue en curso o acaba de terminar
+                            // (silent_track de 250ms): la pista real aún no suena.
+                            // Reset de ventana + preparación + arranque (o pausa
+                            // si el handoff aún está en primer plano).
+                            controller.seekTo(0, 0L)
+                            controller.prepare()
+                            controller.playWhenReady = shouldResume
+                            if (shouldResume) {
+                                Log.d(
+                                    TAG,
+                                    "syncPlaylist: pista real reemplazada y reanudada " +
+                                        "(playWhenReady=true)",
+                                )
+                            } else {
+                                Log.d(
+                                    TAG,
+                                    "syncPlaylist: pista real reemplazada y preparada " +
+                                        "(pausada hasta handoff/bloqueo)",
+                                )
+                            }
                         }
-                        // RESET de ventana + (re)preparación + confirmación de
-                        // arranque. En teléfono físico un error de carga de esta
-                        // primera URI (403/expirada) podía hacer que ExoPlayer
-                        // saltase a la pista 1; el guard abajo re-prepara la pista 0.
-                        controller.seekTo(0, 0L)
-                        controller.prepare()
-                        controller.playWhenReady = shouldResume
                         if (controller.mediaItemCount != 1) {
                             Log.w(
                                 TAG,
                                 "syncPlaylist: hot replace con timeline inesperado " +
-                                    "(${controller.mediaItemCount} items), el backfill lo corregirá",
-                            )
-                        }
-                        if (shouldResume) {
-                            Log.d(
-                                TAG,
-                                "syncPlaylist: pista real reemplazada y reanudada " +
-                                    "(playWhenReady=true)",
-                            )
-                        } else {
-                            Log.d(
-                                TAG,
-                                "syncPlaylist: pista real reemplazada y preparada " +
-                                    "(pausada hasta handoff/bloqueo)",
+                                    "(${controller.mediaItemCount} items), " +
+                                    "el backfill lo corregirá",
                             )
                         }
                     }.onFailure {

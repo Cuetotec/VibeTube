@@ -47,42 +47,69 @@ private const val TAG = "VibeTubePlayer"
 // toda la lista) y ONE (repetición de la canción actual).
 enum class RepeatMode { OFF, ALL, ONE }
 
-// Devuelve el id de la siguiente canción según la combinación activa de
-// RepeatMode e isShuffleEnabled:
+// Resultado de nextTrack: la siguiente canción y la posición del orden
+// permutado desde la que se habrá reproducido (para poder avanzar de forma
+// correcta aunque haya pistas duplicadas, donde indexOf no basta).
+internal data class NextTrackResult(
+    val trackId: String?,
+    val shufflePosition: Int = 0,
+)
+
+// Devuelve la siguiente canción según la combinación activa de RepeatMode e
+// isShuffleEnabled:
 //  - RepeatMode.ONE: mantiene la canción actual (el reproductor la reinicia).
 //  - Shuffle activo: avanza por el orden permutado (shuffleOrder) sin repetir
 //    canciones hasta agotar la lista.
 //  - RepeatMode.OFF: en la última canción no avanza más (null).
 //  - RepeatMode.ALL: en la última canción vuelve al inicio (0 o inicio del
 //    orden aleatorio).
+//
+// [currentShufflePosition] es el índice de la canción actual dentro de
+// shuffleOrder (lo mantiene el ViewModel). Se usa tal cual si apunta a
+// currentTrackId; si no (selección manual fuera del orden), se busca con
+// indexOf. Devolver la posición evita que, con IDs duplicados, indexOf
+// encuentre siempre la PRIMERA ocurrencia y el avance se quede en bucle
+// revisitando posiciones anteriores del orden en lugar de llegar al final.
 internal fun nextTrack(
     currentTrackId: String?,
     tracks: List<Song>,
     repeatMode: RepeatMode,
     isShuffleEnabled: Boolean,
     shuffleOrder: List<String>,
-): String? {
-    if (tracks.isEmpty() || currentTrackId == null) return null
-    if (repeatMode == RepeatMode.ONE) return currentTrackId
-    val size = tracks.size
+    currentShufflePosition: Int = -1,
+): NextTrackResult {
+    if (tracks.isEmpty() || currentTrackId == null) return NextTrackResult(null)
+    if (repeatMode == RepeatMode.ONE) return NextTrackResult(currentTrackId, currentShufflePosition)
     if (isShuffleEnabled && shuffleOrder.isNotEmpty()) {
-        val position = shuffleOrder.indexOf(currentTrackId)
+        // Tamaño sobre el que se camina mientras dure el shuffle: el ORDEN
+        // permutado, no tracks (si hubiera pistas duplicadas, shuffleOrder y
+        // tracks pueden no coincidir en tamaño y nextPosition < tracks.size
+        // podría exceder el índice del shuffleOrder: crash o parada temprana).
+        val position = if (
+            currentShufflePosition in shuffleOrder.indices &&
+            shuffleOrder[currentShufflePosition] == currentTrackId
+        ) {
+            currentShufflePosition
+        } else {
+            shuffleOrder.indexOf(currentTrackId)
+        }
         if (position >= 0) {
             val nextPosition = position + 1
             return when {
-                nextPosition < size -> shuffleOrder[nextPosition]
-                repeatMode == RepeatMode.ALL -> shuffleOrder[0]
-                else -> null
+                nextPosition < shuffleOrder.size ->
+                    NextTrackResult(shuffleOrder[nextPosition], nextPosition)
+                repeatMode == RepeatMode.ALL -> NextTrackResult(shuffleOrder[0], 0)
+                else -> NextTrackResult(null, shuffleOrder.size)
             }
         }
     }
     val index = tracks.indexOfFirst { it.id == currentTrackId }
-    if (index < 0) return null
+    if (index < 0) return NextTrackResult(null)
     val nextIndex = index + 1
     return when {
-        nextIndex < size -> tracks[nextIndex].id
-        repeatMode == RepeatMode.ALL -> tracks[0].id
-        else -> null
+        nextIndex < tracks.size -> NextTrackResult(tracks[nextIndex].id)
+        repeatMode == RepeatMode.ALL -> NextTrackResult(tracks[0].id)
+        else -> NextTrackResult(null)
     }
 }
 
@@ -157,6 +184,12 @@ class PlaylistsViewModel(
     // Orden aleatorio vigente: ids de las pistas activas permutados, con la
     // canción actual en primera posición.
     private var shuffleOrder: List<String> = emptyList()
+
+    // Posición de la canción actual dentro de shuffleOrder. Se mantiene para
+    // avanzar de forma correcta si hay pistas duplicadas (con indexOf se
+    // encontraría siempre la primera ocurrencia y el avance se quedaría en
+    // bucle en lugar de llegar al final del orden).
+    private var shufflePosition: Int = 0
 
     // Canción actualmente en reproducción, derivada de la selección activa
     // (lista propia o guardada) y de las tracks que el ViewModel mantiene
@@ -322,6 +355,7 @@ class PlaylistsViewModel(
             rebuildShuffleOrder()
         } else {
             shuffleOrder = emptyList()
+            shufflePosition = 0
         }
         // El orden activo cambió: se re-envía la lista al servicio (o se salta a
         // la pista actual si aún no había sesión sincronizada).
@@ -342,14 +376,21 @@ class PlaylistsViewModel(
     // Reconstruye el orden aleatorio sobre las pistas activas (lista propia o
     // guardada seleccionada). La canción actual queda en primera posición para
     // continuar desde la pista elegida; el resto se permuta sin repeticiones.
+    // Construye el orden permutado sin repetir PISTAS (no ids) hasta
+    // agotar la lista. No se usa .distinct(): si una pista aparece dos veces
+    // en la lista se reproduce dos veces, igual que en modo secuencial.
+    // Debe recorrer una canción más que tracks.size - shuffleOrder se genera
+    // una sola vez y puede tener longitud distinta; la guarda del shuffled en
+    // nextTrack usa shuffleOrder.size como límite para evitar crashes.
     private fun rebuildShuffleOrder() {
         if (!_isShuffleEnabled.value) return
         val currentId = when {
             _selectedPlaylistId.value != null -> _selectedTrackId.value
             else -> _selectedSavedTrackId.value
         }
-        val ids = activeTracks().map { it.id }.distinct()
+        val ids = activeTracks().map { it.id }
         shuffleOrder = listOfNotNull(currentId) + ids.filterNot { it == currentId }.shuffled()
+        shufflePosition = shuffleOrder.indexOfFirst { it == currentId }
     }
 
     private fun activeTracks(): List<Song> {
@@ -475,13 +516,18 @@ class PlaylistsViewModel(
             }
         val tracks = playlist.tracks
         val currentId = _selectedTrackId.value
-        val nextId = nextTrack(
+        val result = nextTrack(
             currentId,
             tracks,
             _repeatMode.value,
             _isShuffleEnabled.value,
             shuffleOrder,
+            shufflePosition,
         )
+        val nextId = result.trackId
+        if (result.shufflePosition >= 0 && _isShuffleEnabled.value && shuffleOrder.isNotEmpty()) {
+            shufflePosition = result.shufflePosition
+        }
         Log.d(
             TAG,
             "playNextTrack: (canción=$currentId) -> siguiente=${nextId ?: "ninguna"} de " +
@@ -502,13 +548,18 @@ class PlaylistsViewModel(
             }
         val tracks = saved.playlist.tracks
         val currentId = _selectedSavedTrackId.value
-        val nextId = nextTrack(
+        val result = nextTrack(
             currentId,
             tracks,
             _repeatMode.value,
             _isShuffleEnabled.value,
             shuffleOrder,
+            shufflePosition,
         )
+        val nextId = result.trackId
+        if (result.shufflePosition >= 0 && _isShuffleEnabled.value && shuffleOrder.isNotEmpty()) {
+            shufflePosition = result.shufflePosition
+        }
         Log.d(
             TAG,
             "playNextSavedTrack: (canción=$currentId) -> siguiente=${nextId ?: "ninguna"} de " +
